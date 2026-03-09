@@ -8,7 +8,7 @@ CONF_TOKEN_EXPIRE_TIME = "token_expire_time"  # 存储token过期时间戳
 CONF_DEVICE_ID = "device_id"
 CONF_DEVICE_NAME = "device_name"
 
-DEFAULT_SCAN_INTERVAL = 30  # seconds
+DEFAULT_SCAN_INTERVAL = 60  # seconds
 
 API_BASE = "https://openapi.lechange.cn:443/openapi"
 
@@ -19,4 +19,5 @@ PLATFORMS = ["sensor", "binary_sensor", "button"]
 SERVICE_GENERATE_SNAPKEY = "generate_snapkey"
 SERVICE_GET_SNAPKEY_LIST = "get_snapkey_list"
 SERVICE_OPEN_DOOR_REMOTE = "open_door_remote"
+
 SERVICE_WAKE_UP_DEVICE = "wake_up_device"
