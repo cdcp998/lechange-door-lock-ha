@@ -8,6 +8,7 @@
   "config_flow": true,
   "iot_class": "cloud_polling",
   "loggers": ["lechangedoorlock"],
-  "documentation": "https://github.com/your_repo/lechange-door-lock-ha",
-  "issue_tracker": "https://github.com/your_repo/lechange-door-lock-ha/issues"
+  "documentation": "https://github.com/cdcp998/lechange-door-lock-ha",
+  "issue_tracker": "https://github.com/cdcp998/lechange-door-lock-ha/issues"
+
 }
