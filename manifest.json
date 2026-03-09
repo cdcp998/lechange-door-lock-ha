@@ -1,0 +1,13 @@
+{
+  "domain": "lechange_door_lock",
+  "name": "LeChange Door Lock",
+  "version": "1.0.0",
+  "requirements": [],
+  "dependencies": [],
+  "codeowners": ["@cdcp998"],
+  "config_flow": true,
+  "iot_class": "cloud_polling",
+  "loggers": ["lechangedoorlock"],
+  "documentation": "https://github.com/your_repo/lechange-door-lock-ha",
+  "issue_tracker": "https://github.com/your_repo/lechange-door-lock-ha/issues"
+}

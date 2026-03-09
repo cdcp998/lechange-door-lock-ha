@@ -1,0 +1,52 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to LeChange",
+        "description": "Enter your LeChange application credentials.",
+        "data": {
+          "app_id": "App ID",
+          "app_secret": "App Secret"
+        }
+      },
+      "device": {
+        "title": "Select Device",
+        "description": "Select the device you want to add.",
+        "data": {
+          "device_id": "Device"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid authentication credentials.",
+      "no_devices": "No lock devices found under this account.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "Device is already configured."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      }
+    },
+    "binary_sensor": {
+      "online": {
+        "name": "Online"
+      },
+      "channel_online": {
+        "name": "Channel {channel_id} Online"
+      }
+    },
+    "button": {
+      "open_door": {
+        "name": "Remote Open"
+      },
+      "wake_up": {
+        "name": "Wake Up"
+      }
+    }
+  }
+}
