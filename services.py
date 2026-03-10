@@ -13,6 +13,7 @@ from .const import (
     SERVICE_GET_SNAPKEY_LIST,
     SERVICE_OPEN_DOOR_REMOTE,
     SERVICE_WAKE_UP_DEVICE,
+    SERVICE_GET_OPEN_DOOR_RECORD,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,6 +38,11 @@ GENERATE_SNAPKEY_SCHEMA = vol.Schema(
         vol.Required("end_time"): cv.string,
     }
 )
+
+GET_OPEN_DOOR_RECORD_SCHEMA = vol.Schema({
+    vol.Required("device_id"): cv.string,
+    vol.Optional("count", default=30): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
+})
 
 DEVICE_ID_SCHEMA = vol.Schema(
     {
@@ -130,6 +136,27 @@ async def async_wake_up_device(call: ServiceCall):
 
     _LOGGER.debug("Wake up result: %s", result)
 
+async def async_get_open_door_record(call: ServiceCall):
+    """Handle get_open_door_record service call."""
+    hass = call.hass
+    device_id = call.data["device_id"]
+    count = call.data.get("count", 30)
+
+    coordinator = _get_coordinator(hass, device_id)
+    if not coordinator:
+        raise HomeAssistantError(f"Device {device_id} not found")
+
+    result = await coordinator.api.async_get_open_door_record(count=count)
+    if result is None:
+        raise HomeAssistantError("Failed to get open door records")
+
+    _LOGGER.debug("Open door records for %s: %s", device_id, result)
+
+    # 可选：将结果作为事件发送，方便自动化捕获
+    hass.bus.async_fire(f"{DOMAIN}_open_door_records", {
+        "device_id": device_id,
+        "records": result.get("records", [])
+    })
 
 async def async_setup_services(hass: HomeAssistant) -> None:
     """Register LeChange services."""
@@ -163,6 +190,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         SERVICE_WAKE_UP_DEVICE,
         async_wake_up_device,
         schema=DEVICE_ID_SCHEMA,
+    )
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_OPEN_DOOR_RECORD,
+        async_get_open_door_record,
+        schema = GET_OPEN_DOOR_RECORD_SCHEMA,
     )
 
     _LOGGER.debug("LeChange services registered")

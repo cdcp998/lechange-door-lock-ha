@@ -223,6 +223,14 @@ class LeChangeAPI:
     async def async_wake_up_device(self):
         return await self._request("wakeUpDevice", {"url": "/device/wakeup"})
 
+    async def async_get_open_door_record(self, count: int = 30):
+        """Get door open records (latest 'count' records)."""
+        params = {
+            "recordId": "-1",  # -1 表示从最新的记录开始
+            "count": count
+        }
+        return await self._request("getOpenDoorRecord", params)
+
     async def async_generate_snapkey(
         self, name, effective_num, effective_day, effect_period, begin_time, end_time
     ):
@@ -292,7 +300,7 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
 
         return data
 
-    async def _async_update_device_info(self, now=None):
+    async def _async_update_device_info(self, now = None):
         """Update firmware and model info."""
         details = await self.api.async_get_device_details()
 
@@ -301,26 +309,35 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
 
         version = details.get("deviceVersion")
         model = details.get("deviceModel")
+        deviceId = details.get("deviceId")
+        brand = details.get("brand")
 
         device_registry = dr.async_get(self.hass)
 
         device_entry = device_registry.async_get_device(
-            identifiers={(DOMAIN, self.device_id)}
+            identifiers = {(DOMAIN, self.device_id)}
         )
 
         if not device_entry:
             return
 
-        updates = {}
+        # 准备更新参数
+        update_kwargs = {}
 
         if version:
-            updates["sw_version"] = version
+            update_kwargs["sw_version"] = version
 
         if model:
-            updates["model"] = model
+            update_kwargs["model"] = model
 
-        if updates:
-            device_registry.async_update_device(device_entry.id, **updates)
+        if brand:
+            update_kwargs["manufacturer"] = brand
+
+        if deviceId:
+            update_kwargs["serial_number"] = deviceId
+
+        if update_kwargs:
+            device_registry.async_update_device(device_entry.id, **update_kwargs)
 
     async def async_update_device_info(self):
         """Public method to trigger device info update."""

@@ -31,6 +31,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         name=entry.title,
         manufacturer="LeChange",
         model="Unknown",
+        serial_number = "Unknown",
     )
 
     # 立即更新设备信息（型号、版本）
