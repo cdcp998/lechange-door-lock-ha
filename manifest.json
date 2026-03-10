@@ -1,7 +1,10 @@
 {
   "domain": "lechange_door_lock",
   "name": "LeChange Door Lock",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "icons": {
+    "128": "icon.png"
+  },
   "requirements": [],
   "dependencies": [],
   "codeowners": ["@cdcp998"],
@@ -10,5 +13,4 @@
   "loggers": ["lechangedoorlock"],
   "documentation": "https://github.com/cdcp998/lechange-door-lock-ha",
   "issue_tracker": "https://github.com/cdcp998/lechange-door-lock-ha/issues"
-
 }

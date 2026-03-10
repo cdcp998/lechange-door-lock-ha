@@ -47,3 +47,14 @@ wake_up_device:
     device_id:
       name: 设备ID
       description: 设备序列号。
+
+get_open_door_record:
+  name: 获取开门记录
+  description: 获取最近的开门记录。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    count:
+      name: 记录数量
+      description: 获取最近多少条记录（最多100条）。

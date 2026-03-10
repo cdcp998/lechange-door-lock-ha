@@ -5,56 +5,24 @@ generate_snapkey:
     device_id:
       name: Device ID
       description: The device serial number.
-      required: true
-      example: "600EBBDRSF80000"
-      selector:
-        text:
     name:
       name: Key name
       description: Name of the key.
-      required: true
-      example: "Guest key"
-      selector:
-        text:
     effective_num:
       name: Effective number
       description: Number of times the key can be used (-1 for unlimited).
-      required: true
-      example: -1
-      selector:
-        number:
-          min: -1
-          max: 100
     effective_day:
       name: Effective days
       description: Number of days the key is valid (1-90).
-      required: true
-      example: 7
-      selector:
-        number:
-          min: 1
-          max: 90
     effect_period:
       name: Effect period
       description: List of periods with day, beginTime, endTime.
-      required: true
-      example: '[{"period":"Monday","beginTime":"12:00:00","endTime":"18:00:00"}]'
-      selector:
-        object:
     begin_time:
       name: Begin time
       description: Start time in HH:mm:ss format.
-      required: true
-      example: "12:00:00"
-      selector:
-        text:
     end_time:
       name: End time
       description: End time in HH:mm:ss format.
-      required: true
-      example: "18:00:00"
-      selector:
-        text:
 
 get_snapkey_list:
   name: Get temporary password list
@@ -63,10 +31,6 @@ get_snapkey_list:
     device_id:
       name: Device ID
       description: The device serial number.
-      required: true
-      example: "600EBBDRSF80000"
-      selector:
-        text:
 
 open_door_remote:
   name: Remote open door
@@ -75,10 +39,6 @@ open_door_remote:
     device_id:
       name: Device ID
       description: The device serial number.
-      required: true
-      example: "600EBBDRSF80000"
-      selector:
-        text:
 
 wake_up_device:
   name: Wake up device
@@ -87,10 +47,6 @@ wake_up_device:
     device_id:
       name: Device ID
       description: The device serial number.
-      required: true
-      example: "600EBBDRSF80000"
-      selector:
-        text:
 
 get_open_door_record:
   name: Get open door records
@@ -99,17 +55,6 @@ get_open_door_record:
     device_id:
       name: Device ID
       description: The device serial number.
-      required: true
-      example: "600EBBDRSF80000"
-      selector:
-        text:
     count:
       name: Number of records
       description: How many recent records to retrieve (max 100).
-      required: false
-      default: 30
-      selector:
-        number:
-          min: 1
-          max: 100
-          step: 1
