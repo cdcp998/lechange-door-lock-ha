@@ -1,0 +1,9 @@
+{
+  "name": "LeChange Door Lock",
+  "content_in_root": false,
+  "render_readme": true,
+  "domains": ["lechange_door_lock"],
+  "country": ["CN","EN"],
+  "homeassistant": "2026.3.1",
+  "iot_class": "Cloud Polling"
+}

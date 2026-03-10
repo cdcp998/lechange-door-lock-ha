@@ -1,0 +1,60 @@
+generate_snapkey:
+  name: 生成临时密码
+  description: 为门锁生成一个临时密码。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    name:
+      name: 密钥名称
+      description: 密钥的名称。
+    effective_num:
+      name: 有效次数
+      description: 密钥可使用的次数（-1为无限次）。
+    effective_day:
+      name: 有效天数
+      description: 密钥有效的天数（1-90）。
+    effect_period:
+      name: 生效时间段
+      description: 生效的时间段列表，包含星期几、开始时间、结束时间。
+    begin_time:
+      name: 开始时间
+      description: 开始时间，格式 HH:mm:ss。
+    end_time:
+      name: 结束时间
+      description: 结束时间，格式 HH:mm:ss。
+
+get_snapkey_list:
+  name: 获取临时密码列表
+  description: 获取门锁的临时密码列表。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+
+open_door_remote:
+  name: 远程开门
+  description: 远程打开门锁。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+
+wake_up_device:
+  name: 唤醒设备
+  description: 唤醒休眠的门锁设备。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+
+get_open_door_record:
+  name: 获取开门记录
+  description: 获取最近的开门记录。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    count:
+      name: 记录数量
+      description: 获取最近多少条记录（最多100条）。
