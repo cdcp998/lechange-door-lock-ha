@@ -1,6 +1,6 @@
 {
   "name": "LeChange Door Lock",
-  "content_in_root": false,
+  "content_in_root": true,
   "render_readme": true,
   "domains": ["lechange_door_lock"],
   "country": ["CN","EN"],
