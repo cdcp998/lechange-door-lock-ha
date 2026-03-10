@@ -49,8 +49,10 @@
 |------|------|----------|
 | `lechange_door_lock.generate_snapkey` | 生成临时密码 | `device_id`, `name`, `effective_num`, `effective_day`, `effect_period`, `begin_time`, `end_time` |
 | `lechange_door_lock.get_snapkey_list` | 获取临时密码列表 | `device_id` |
+| `lechange_door_lock.get_open_door_record` | 获取开门记录 | `device_id` |
 | `lechange_door_lock.open_door_remote` | 远程开门 | `device_id` |
 | `lechange_door_lock.wake_up_device` | 唤醒设备 | `device_id` |
+
 
 #### 自动化示例
 ```yaml
@@ -82,6 +84,8 @@ automation:
 - **多设备支持**：每个门锁需单独添加，设备 ID 在乐橙 App 或开放平台中可查。
 
 ### 📜 更新日志
+#### v1.0.1 (2026-03-11)
+- 添加开门记录
 #### v1.0.0 (2026-03-10)
 - 首次发布。
 - 支持设备在线状态、电量监控。
