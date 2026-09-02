@@ -2,7 +2,7 @@
   "name": "LeChange Door Lock",
   "content_in_root": false,
   "render_readme": true,
-  "country": ["CN", "EN"],
+  "country": ["CN", "US"],
   "homeassistant": "2024.1.0",
   "zip_release": false,
   "hacs": "2.0.0"

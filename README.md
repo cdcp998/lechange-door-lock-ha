@@ -133,7 +133,7 @@ go2rtc:
 ### 🧪 测试
 单元测试（不依赖 HA 运行时、不访问网络、全部使用匿名化夹具）:
 ```powershell
-pip install pytest pytest-asyncio
+pip install -r requirements-test.txt
 pytest tests/ -q
 ```
 覆盖:x-pcs 签名头(黄金用例)、登录后密钥派生、会话失效自动重登、HTTP/网络/TLS
