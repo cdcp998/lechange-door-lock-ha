@@ -1,219 +1,193 @@
-import logging
-import time
-import hashlib
-import uuid
+"""Config flow for the LeChange (Imou) door lock integration."""
+
+from __future__ import annotations
+
 import json
-import asyncio
+import logging
 from typing import Optional
 
 import aiohttp
-import async_timeout
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 import homeassistant.helpers.config_validation as cv
+
 from .const import (
     DOMAIN,
-    API_BASE,
-    CONF_APP_ID,
-    CONF_APP_SECRET,
-    CONF_ACCESS_TOKEN,
-    CONF_TOKEN_EXPIRE_TIME,
+    CONF_USERNAME,
+    CONF_PASSWORD,
+    CONF_SESSION_ID,
+    CONF_TOKEN,
+    CONF_INTERNAL_USERNAME,
+    CONF_USER_ID,
+    CONF_API_HOST,
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
+    CONF_PRODUCT_ID,
+    CONF_MODEL_NAME,
+    CONF_FIRMWARE_VERSION,
+    CONF_CHANNEL_JSON,
+    CONF_LOCK_STATE,
+    CONF_STREAM_ENTRY,
+    CONF_RTSP_HOST,
+    CONF_RTSP_PORT,
+    CONF_RTSP_USERNAME,
+    CONF_RTSP_PASSWORD,
+    CONF_RTSP_URL,
+    CONF_RTSP_SUBTYPE,
 )
+from .imou_client import ImouAPIError, ImouClient
 
 _LOGGER = logging.getLogger(__name__)
 
-
-
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_APP_ID): cv.string,
-        vol.Required(CONF_APP_SECRET): cv.string,
+        vol.Required(CONF_USERNAME): cv.string,
+        vol.Required(CONF_PASSWORD): cv.string,
     }
 )
 
 
-def generate_sign(app_id: str, app_secret: str) -> dict:
-    """Generate system parameters with sign."""
-    time_utc = int(time.time())
-    nonce = str(uuid.uuid4())
-    sign_str = f"time:{time_utc},nonce:{nonce},appSecret:{app_secret}"
-    sign = hashlib.md5(sign_str.encode()).hexdigest()
-    return {
-        "ver": "1.0",
-        "appId": app_id,
-        "time": time_utc,
-        "nonce": nonce,
-        "sign": sign,
-    }
-
-
-async def request_token(session, app_id: str, app_secret: str) -> Optional[dict]:
-    """Request access token."""
-    payload = {
-        "system": generate_sign(app_id, app_secret),
-        "id": str(uuid.uuid4()),
-        "params": {},
-    }
-    url = f"{API_BASE}/accessToken"
-    try:
-        async with async_timeout.timeout(10):
-            resp = await session.post(url, json=payload)
-            text = await resp.text()
-            try:
-                data = json.loads(text)
-            except Exception:
-                _LOGGER.error("Invalid JSON: %s", text)
-                return None
-            result = data.get("result", {})
-            if result.get("code") != "0":
-                _LOGGER.error("Token error: %s", result.get("msg"))
-                return None
-            return result.get("data")
-    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-        _LOGGER.error("Token request failed: %s", err)
-        return None
-
-
-async def list_devices(session, app_id: str, app_secret: str, token: str) -> Optional[list]:
-    """Get all devices under account."""
-    params = {"page": 1, "pageSize": 50, "source": "bindAndShare", "token": token}
-    payload = {
-        "system": generate_sign(app_id, app_secret),
-        "id": str(uuid.uuid4()),
-        "params": params,
-    }
-    url = f"{API_BASE}/listDeviceDetailsByPage"
-    try:
-        async with async_timeout.timeout(10):
-            resp = await session.post(url, json=payload)
-            text = await resp.text()
-            data = json.loads(text)
-            result = data.get("result", {})
-            if result.get("code") != "0":
-                _LOGGER.error("List devices error: %s", result.get("msg"))
-                return None
-            return result.get("data", {}).get("deviceList")
-    except Exception as err:
-        _LOGGER.error("List devices failed: %s", err)
-        return None
-
-
-async def is_lock_device(session, app_id: str, app_secret: str, token: str, device_id: str) -> bool:
-    """Check if device is a lock by calling power info API."""
-    params = {"token": token, "deviceId": device_id}
-    payload = {
-        "system": generate_sign(app_id, app_secret),
-        "id": str(uuid.uuid4()),
-        "params": params,
-    }
-    url = f"{API_BASE}/getDevicePowerInfo"
-    try:
-        async with async_timeout.timeout(10):
-            resp = await session.post(url, json=payload)
-            text = await resp.text()
-            data = json.loads(text)
-            result = data.get("result", {})
-            if result.get("code") == "0" and "electricitys" in result.get("data", {}):
-                return True
-            return False
-    except Exception:
-        return False
-
-
-async def validate_input(hass: HomeAssistant, data):
-    """Validate user input and fetch devices."""
-    app_id = data[CONF_APP_ID]
-    app_secret = data[CONF_APP_SECRET]
-
+async def http_login(username: str, password: str) -> dict:
+    """Login via the client-side API; returns session dict."""
     async with aiohttp.ClientSession() as session:
-        # 1. Get access token
-        token_data = await request_token(session, app_id, app_secret)
-        if not token_data:
-            raise ValueError("Failed to get access token")
-        access_token = token_data["accessToken"]
-        expire_time = int(time.time()) + token_data["expireTime"]
+        client = ImouClient(session)
+        data = await client.async_login(username, password)
+        data["username_input"] = username
+        data["password_input"] = password
+        return data
 
-        # 2. List all devices
-        all_devices = await list_devices(session, app_id, app_secret, access_token)
-        if not all_devices:
-            raise ValueError("No devices found")
 
-        # 3. Filter lock devices (concurrently)
-        tasks = [
-            is_lock_device(session, app_id, app_secret, access_token, dev["deviceId"])
-            for dev in all_devices
-        ]
-        results = await asyncio.gather(*tasks)
-        lock_devices = [dev for dev, is_lock in zip(all_devices, results) if is_lock]
-
-        if not lock_devices:
-            raise ValueError("No lock devices found")
-
-        return {
-            "access_token": access_token,
-            "expire_time": expire_time,
-            "devices": lock_devices,
-        }
+async def http_list_devices(username: str, password: str, session_data: dict) -> list[dict]:
+    """Login (reuse session) and list devices."""
+    async with aiohttp.ClientSession() as session:
+        client = ImouClient(
+            session,
+            username=username,
+            password=password,
+            session_id=session_data.get("session_id"),
+            token=session_data.get("token"),
+            internal_username=session_data.get("internal_username"),
+            api_host=session_data.get("host"),
+        )
+        return await client.async_get_devices()
 
 
 class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    VERSION = 1
+    """Account + password -> device selection."""
 
-    def __init__(self):
-        self._credentials = {}
-        self._devices = []
-        self._access_token = None
-        self._token_expire_time = None
+    VERSION = 2
 
-    async def async_step_user(self, user_input=None):
+    def __init__(self) -> None:
+        self._login_data: dict = {}
+        self._devices: list[dict] = []
+
+    async def async_step_user(self, user_input: Optional[dict] = None) -> FlowResult:
         errors = {}
         if user_input is not None:
-            self._credentials = user_input
+            username = user_input[CONF_USERNAME].strip()
+            password = user_input[CONF_PASSWORD]
             try:
-                result = await validate_input(self.hass, user_input)
-                self._access_token = result["access_token"]
-                self._token_expire_time = result["expire_time"]
-                self._devices = result["devices"]
-                if not self._devices:
+                login_data = await http_login(username, password)
+                devices = await http_list_devices(username, password, login_data)
+                devices.sort(key=lambda d: (not ImouClient.is_lock(d), d["name"]))
+                if not devices:
+                    raise ImouAPIError(-4, "no devices")
+                self._login_data = login_data
+                self._devices = devices
+                return await self.async_step_device()
+            except ImouAPIError as err:
+                _LOGGER.error("Login failed: %s", err)
+                if err.code == -4:
                     errors["base"] = "no_devices"
+                elif err.code in (-2, -3):
+                    errors["base"] = "network"
                 else:
-                    return await self.async_step_device()
-            except ValueError as e:
-                _LOGGER.error("Validation error: %s", e)
-                errors["base"] = "invalid_auth"
-            except Exception as e:
-                _LOGGER.exception("Unexpected exception: %s", e)
+                    errors["base"] = "invalid_auth"
+            except (aiohttp.ClientError, TimeoutError) as err:
+                _LOGGER.error("Login network error: %s", err)
+                errors["base"] = "network"
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.exception("Unexpected login error: %s", err)
                 errors["base"] = "unknown"
 
         return self.async_show_form(
             step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
         )
 
-    async def async_step_device(self, user_input=None):
+    async def async_step_device(self, user_input: Optional[dict] = None) -> FlowResult:
         if user_input is not None:
-            selected_device_id = user_input[CONF_DEVICE_ID]
-            device = next(d for d in self._devices if d["deviceId"] == selected_device_id)
-            await self.async_set_unique_id(selected_device_id)
+            device_id = user_input[CONF_DEVICE_ID]
+            device = next(
+                (d for d in self._devices if d["deviceId"] == device_id), None
+            )
+            if device is None:
+                return self.async_abort(reason="device_not_found")
+            await self.async_set_unique_id(device_id)
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
-                title=device.get("deviceName", selected_device_id),
+                title=device["name"],
                 data={
-                    CONF_APP_ID: self._credentials[CONF_APP_ID],
-                    CONF_APP_SECRET: self._credentials[CONF_APP_SECRET],
-                    CONF_ACCESS_TOKEN: self._access_token,
-                    CONF_TOKEN_EXPIRE_TIME: self._token_expire_time,
-                    CONF_DEVICE_ID: selected_device_id,
-                    CONF_DEVICE_NAME: device.get("deviceName", ""),
+                    CONF_USERNAME: self._login_data["username_input"],
+                    CONF_PASSWORD: self._login_data["password_input"],
+                    CONF_SESSION_ID: self._login_data["session_id"],
+                    CONF_TOKEN: self._login_data["token"],
+                    CONF_INTERNAL_USERNAME: self._login_data["internal_username"],
+                    CONF_USER_ID: self._login_data.get("user_id"),
+                    CONF_API_HOST: self._login_data["host"],
+                    CONF_DEVICE_ID: device_id,
+                    CONF_DEVICE_NAME: device["name"],
+                    CONF_PRODUCT_ID: device["productId"],
+                    CONF_MODEL_NAME: device["model"],
+                    CONF_FIRMWARE_VERSION: device["version"],
+                    CONF_CHANNEL_JSON: json.dumps(
+                        device.get("channels", []), ensure_ascii=False
+                    ),
+                    CONF_LOCK_STATE: device.get("lockState", ""),
+                    CONF_STREAM_ENTRY: device.get("stream_entry", ""),
                 },
             )
 
         devices_dict = {
-            d["deviceId"]: f"{d.get('deviceName', d['deviceId'])} ({d['deviceId']})"
+            d["deviceId"]: f"{d['name']} ({d['deviceId']}){'' if ImouClient.is_lock(d) else ' ·非门锁'}"
             for d in self._devices
         }
         schema = vol.Schema({vol.Required(CONF_DEVICE_ID): vol.In(devices_dict)})
         return self.async_show_form(step_id="device", data_schema=schema)
+
+    @staticmethod
+    def async_get_options_flow(config_entry):
+        return LeChangeOptionsFlowHandler(config_entry)
+
+    def async_migrate_entry(self, entry) -> bool:
+        """Old OpenAPI-based entries cannot be migrated automatically."""
+        return False
+
+
+class LeChangeOptionsFlowHandler(config_entries.OptionsFlow):
+    """Options flow: RTSP/video settings."""
+
+    def __init__(self, config_entry) -> None:
+        self._entry = config_entry
+
+    async def async_step_init(self, user_input: Optional[dict] = None) -> FlowResult:
+        data = self._entry.options or {}
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_RTSP_URL, default=data.get(CONF_RTSP_URL, "")): cv.string,
+                vol.Optional(CONF_RTSP_HOST, default=data.get(CONF_RTSP_HOST, "")): cv.string,
+                vol.Optional(CONF_RTSP_PORT, default=int(data.get(CONF_RTSP_PORT, 554))): int,
+                vol.Optional(
+                    CONF_RTSP_USERNAME, default=data.get(CONF_RTSP_USERNAME, "admin")
+                ): cv.string,
+                vol.Optional(
+                    CONF_RTSP_PASSWORD, default=data.get(CONF_RTSP_PASSWORD, "")
+                ): cv.string,
+                vol.Optional(
+                    CONF_RTSP_SUBTYPE, default=int(data.get(CONF_RTSP_SUBTYPE, 0))
+                ): vol.In([0, 1]),
+            }
+        )
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+        return self.async_show_form(step_id="init", data_schema=schema)

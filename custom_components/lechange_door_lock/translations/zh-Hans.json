@@ -3,50 +3,130 @@
     "step": {
       "user": {
         "title": "连接到乐橙",
-        "description": "请输入您的乐橙应用凭证。",
+        "description": "请输入您的乐橙 App 账号和密码(客户端协议,非开放平台凭证)。\n\n⚠️ 本集成基于非官方逆向协议,仅限个人学习研究,不保证可用性,账号与使用风险自负(详见 README 免责声明)。",
         "data": {
-          "app_id": "appid",
-          "app_secret": "appsecret"
+          "username": "乐橙账号",
+          "password": "密码"
         }
       },
       "device": {
         "title": "选择设备",
-        "description": "请选择要添加的设备。",
+        "description": "请选择要添加的门锁设备。",
         "data": {
           "device_id": "设备"
         }
       }
     },
     "error": {
-      "invalid_auth": "无效的身份验证凭证。",
-      "no_devices": "该账号下未找到门锁设备。",
+      "invalid_auth": "账号或密码错误,或需要人机验证。",
+      "no_devices": "该账号下未找到设备。",
+      "network": "网络错误,请稍后重试。",
       "unknown": "未知错误。"
     },
     "abort": {
-      "already_configured": "设备已经配置。"
+      "already_configured": "设备已经配置。",
+      "device_not_found": "未找到所选设备。"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "摄像头(视频)选项",
+        "description": "配置门锁摄像头的 RTSP 源。默认使用添加设备时保存的云端流媒体网关;rtsp_url 优先级最高,其次 rtsp_host(局域网直连),两者留空则使用云端默认地址。",
+        "data": {
+          "rtsp_url": "完整 RTSP/中转 URL(可选)",
+          "rtsp_host": "局域网 IP(留空=云端流媒体网关)",
+          "rtsp_port": "RTSP 端口",
+          "rtsp_username": "RTSP 用户名",
+          "rtsp_password": "RTSP 密码",
+          "rtsp_subtype": "码流(0 主码流 / 1 子码流)"
+        }
+      }
     }
   },
   "entity": {
+    "lock": {
+      "door_lock": {
+        "name": "门锁"
+      }
+    },
     "sensor": {
-      "battery": {
-        "name": "电池电量"
+      "battery_lock": {
+        "name": "门锁电池电量"
+      },
+      "battery_camera": {
+        "name": "摄像机电池电量"
+      },
+      "door_state": {
+        "name": "门状态",
+        "state": {
+          "closed": "关",
+          "open": "开",
+          "unknown": "未知"
+        }
+      },
+      "power_mode": {
+        "name": "电量模式",
+        "state": {
+          "0": "正常",
+          "1": "省电",
+          "2": "超级省电",
+          "unknown": "未知"
+        }
+      },
+      "wifi_signal": {
+        "name": "WiFi 信号",
+        "state": {
+          "0": "异常",
+          "1": "无网络",
+          "2": "较差",
+          "3": "一般",
+          "4": "较好"
+        }
+      },
+      "last_open": {
+        "name": "最近开门记录"
       }
     },
     "binary_sensor": {
       "online": {
         "name": "在线状态"
       },
-      "channel_online": {
-        "name": "通道 {channel_id} 在线状态"
+      "sleeping": {
+        "name": "休眠中"
+      },
+      "tamper": {
+        "name": "防拆报警"
+      },
+      "child_lock": {
+        "name": "童锁"
+      },
+      "open_door_by_touch": {
+        "name": "触屏开门"
       }
     },
-    
     "button": {
       "open_door": {
         "name": "远程开门"
       },
       "wake_up": {
         "name": "唤醒设备"
+      }
+    },
+    "switch": {
+      "child_lock": {
+        "name": "童锁"
+      },
+      "call_transfer": {
+        "name": "呼叫转接"
+      },
+      "open_door_by_touch": {
+        "name": "触屏开门"
+      }
+    },
+    "camera": {
+      "camera": {
+        "name": "通道 {channel_id} 摄像头"
       }
     }
   }

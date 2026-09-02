@@ -1,265 +1,69 @@
-"""DataUpdateCoordinator for LeChange."""
+"""DataUpdateCoordinator for the LeChange (Imou) client-side cloud API."""
 
-import asyncio
-import hashlib
+from __future__ import annotations
+
 import json
 import logging
-import time
-import uuid
 from datetime import timedelta
-from typing import Optional, List
+from typing import Any, Optional
 
-import aiohttp
-import async_timeout
-
-from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
+    CONF_DEVICE_ID,
+    CONF_DEVICE_NAME,
+    CONF_API_HOST,
+    CONF_INTERNAL_USERNAME,
+    CONF_PASSWORD,
+    CONF_PRODUCT_ID,
+    CONF_SESSION_ID,
+    CONF_TOKEN,
+    CONF_USERNAME,
     DOMAIN,
     DEFAULT_SCAN_INTERVAL,
-    API_BASE,
-    CONF_APP_ID,
-    CONF_APP_SECRET,
-    CONF_ACCESS_TOKEN,
-    CONF_TOKEN_EXPIRE_TIME,
-    CONF_DEVICE_ID,
+    EVENT_PREFIX,
+    STATUS_ONLINE,
+    STATUS_SLEEP,
+    PROP_LOCK_NOTE_REPORT,
+    PROP_CHANNEL_NAMES,
 )
+from .imou_client import ImouAPIError, ImouClient
+from .state_utils import derive_lock_state, extract_batteries, normalize_wifi
 
 _LOGGER = logging.getLogger(__name__)
 
-TOKEN_REFRESH_MARGIN = 300
 
+class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
+    """Poll lock properties + device status from the Imou cloud."""
 
-class LeChangeAPI:
-    """LeChange Cloud API wrapper."""
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        entry: ConfigEntry,
-    ):
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
         self.hass = hass
         self.entry = entry
 
-        self.app_id = entry.data[CONF_APP_ID]
-        self.app_secret = entry.data[CONF_APP_SECRET]
+        self.device_id: str = entry.data[CONF_DEVICE_ID]
+        self.product_id: str = entry.data.get(CONF_PRODUCT_ID, "")
+        self.channel_id: str = "0"
 
-        self._access_token = entry.data.get(CONF_ACCESS_TOKEN)
-        self._token_expire_time = entry.data.get(CONF_TOKEN_EXPIRE_TIME)
-
-        self.device_id = entry.data[CONF_DEVICE_ID]
-
-        self.session = async_get_clientsession(hass)
-
-        self._token_lock = asyncio.Lock()
-
-    async def _ensure_valid_token(self):
-        """Ensure token is valid."""
-        if not self._access_token or not self._token_expire_time:
-            await self._refresh_token()
-            return
-
-        if self._token_expire_time - int(time.time()) < TOKEN_REFRESH_MARGIN:
-            _LOGGER.debug("Token expiring soon, refreshing")
-            await self._refresh_token()
-
-    async def _refresh_token(self):
-        """Refresh access token."""
-        async with self._token_lock:
-            token_data = await self._request_token()
-
-            if not token_data:
-                _LOGGER.error("Token refresh failed")
-                return
-
-            self._access_token = token_data["accessToken"]
-            self._token_expire_time = int(time.time()) + token_data["expireTime"]
-
-            _LOGGER.debug("Token refreshed")
-
-            new_data = dict(self.entry.data)
-            new_data[CONF_ACCESS_TOKEN] = self._access_token
-            new_data[CONF_TOKEN_EXPIRE_TIME] = self._token_expire_time
-
-            self.hass.config_entries.async_update_entry(self.entry, data=new_data)
-
-    async def _request_token(self) -> Optional[dict]:
-        """Request access token."""
-        payload = {
-            "system": self._generate_sign(),
-            "id": str(uuid.uuid4()),
-            "params": {},
-        }
-
-        url = f"{API_BASE}/accessToken"
-
-        try:
-            async with async_timeout.timeout(10):
-                resp = await self.session.post(url, json=payload)
-
-                if resp.status != 200:
-                    _LOGGER.error("Token HTTP error: %s", resp.status)
-                    return None
-
-                text = await resp.text()
-                data = self._parse_json(text)
-
-                if not data:
-                    return None
-
-                result = data.get("result", {})
-
-                if result.get("code") != "0":
-                    _LOGGER.error("Token error: %s", result.get("msg"))
-                    return None
-
-                return result.get("data")
-
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            _LOGGER.error("Token request failed: %s", err)
-            return None
-
-    def _generate_sign(self) -> dict:
-        """Generate request signature."""
-        time_utc = int(time.time())
-        nonce = str(uuid.uuid4())
-
-        sign_str = f"time:{time_utc},nonce:{nonce},appSecret:{self.app_secret}"
-        sign = hashlib.md5(sign_str.encode()).hexdigest()
-
-        return {
-            "ver": "1.0",
-            "appId": self.app_id,
-            "time": time_utc,
-            "nonce": nonce,
-            "sign": sign,
-        }
-
-    def _parse_json(self, text: str) -> Optional[dict]:
-        """Parse JSON safely."""
-        try:
-            return json.loads(text)
-        except Exception:
-            _LOGGER.error("Invalid JSON response: %s", text)
-            return None
-
-    async def _request(self, method: str, params: dict = None) -> Optional[dict]:
-        """Send API request."""
-        await self._ensure_valid_token()
-
-        if params is None:
-            params = {}
-
-        params["token"] = self._access_token
-        params["deviceId"] = self.device_id
-
-        payload = {
-            "system": self._generate_sign(),
-            "id": str(uuid.uuid4()),
-            "params": params,
-        }
-
-        url = f"{API_BASE}/{method}"
-
-        try:
-            async with async_timeout.timeout(10):
-                resp = await self.session.post(url, json=payload)
-
-                if resp.status != 200:
-                    _LOGGER.error("HTTP error %s", resp.status)
-                    return None
-
-                text = await resp.text()
-                data = self._parse_json(text)
-
-                if not data:
-                    return None
-
-                result = data.get("result", {})
-                code = result.get("code")
-
-                if code == "0":
-                    return result.get("data")
-
-                if code == "TK1002":
-                    _LOGGER.warning("Token expired, refreshing")
-                    await self._refresh_token()
-                    return await self._request(method, params)
-
-                _LOGGER.error("API error %s: %s", code, result.get("msg"))
-                return None
-
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            _LOGGER.error("API request failed: %s", err)
-            return None
-
-    async def async_device_online(self):
-        return await self._request("deviceOnline")
-
-    async def async_get_device_power_info(self):
-        return await self._request("getDevicePowerInfo")
-
-    async def async_get_device_details(self):
-        data = await self._request(
-            "listDeviceDetailsByPage",
-            {"page": 1, "pageSize": 10, "source": "bindAndShare"},
+        client_session = async_get_clientsession(hass)
+        self.api = ImouClient(
+            client_session,
+            username=entry.data.get(CONF_USERNAME, ""),
+            password=entry.data.get(CONF_PASSWORD, ""),
+            session_id=entry.data.get(CONF_SESSION_ID, ""),
+            token=entry.data.get(CONF_TOKEN, ""),
+            internal_username=entry.data.get(CONF_INTERNAL_USERNAME, ""),
+            api_host=entry.data.get(CONF_API_HOST, ""),
+            on_session_update=self._persist_session,
         )
 
-        if data and "deviceList" in data:
-            for device in data["deviceList"]:
-                if device["deviceId"] == self.device_id:
-                    return device
-
-        return None
-
-    async def async_open_door_remote(self):
-        return await self._request("openDoorRemote")
-
-    async def async_wake_up_device(self):
-        return await self._request("wakeUpDevice", {"url": "/device/wakeup"})
-
-    async def async_get_open_door_record(self, count: int = 30):
-        """Get door open records (latest 'count' records)."""
-        params = {
-            "recordId": "-1",  # -1 表示从最新的记录开始
-            "count": count
-        }
-        return await self._request("getOpenDoorRecord", params)
-
-    async def async_generate_snapkey(
-        self, name, effective_num, effective_day, effect_period, begin_time, end_time
-    ):
-        return await self._request(
-            "generateSnapkey",
-            {
-                "name": name,
-                "effectiveNum": effective_num,
-                "effectiveDay": effective_day,
-                "effectPeriod": effect_period,
-                "beginTime": begin_time,
-                "endTime": end_time,
-            },
-        )
-
-    async def async_get_snapkey_list(self):
-        return await self._request("getSnapkeyList")
-
-
-class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
-    """Coordinator for LeChange device."""
-
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry):
-        self.entry = entry
-        self.device_id = entry.data[CONF_DEVICE_ID]
-
-        self.api = LeChangeAPI(hass, entry)
-
-        self._version_update_unsub = None
+        self._seen_lock_notes: set[str] = set()
+        self._device_info_update_unsub = None
 
         super().__init__(
             hass,
@@ -268,83 +72,186 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
 
-        self._version_update_unsub = async_track_time_interval(
-            hass,
-            self._async_update_device_info,
-            timedelta(days=1),
-        )
+        # 每天刷新一次设备注册表型号/固件
+        @callback
+        def _schedule(now=None):
+            if self._device_info_update_unsub:
+                self._device_info_update_unsub()
+            self._device_info_update_unsub = async_track_time_interval(
+                hass, self._async_update_device_info, timedelta(days=1)
+            )
 
-    async def _async_update_data(self):
-        """Fetch device status."""
-        data = {}
-
-        online_result = await self.api.async_device_online()
-
-        if online_result:
-            data["online"] = online_result.get("onLine")
-            data["channels"] = online_result.get("channels", [])
-
+        if hass.is_running:
+            _schedule()
         else:
-            data["online"] = None
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _schedule)
+
+    @callback
+    def _persist_session(self, session: dict) -> None:
+        """Persist refreshed session data into the config entry."""
+        data = dict(self.entry.data)
+        data.update(session)
+        self.hass.config_entries.async_update_entry(self.entry, data=data)
+        _LOGGER.debug("Persisted new session")
+
+    @property
+    def device_name(self) -> str:
+        return self.entry.data.get(CONF_DEVICE_NAME) or self.entry.title
+
+    async def async_get_device_snapshot(self) -> Optional[dict]:
+        """Find this device's entry inside the account device list."""
+        devices = await self.api.async_get_devices()
+        for dev in devices:
+            if dev["deviceId"] == self.device_id:
+                return dev
+        return None
+
+    async def _async_update_data(self) -> dict:
+        """Fetch device status + all IoT properties."""
+        data: dict[str, Any] = {"last_error": None}
+        props: dict[str, Any] = {}
+
+        try:
+            snapshot = await self.async_get_device_snapshot()
+            if snapshot:
+                data["status"] = snapshot.get("status", "")
+                data["lock_state"] = snapshot.get("lockState", "")
+                data["channels"] = snapshot.get("channels", [])
+                data["online"] = snapshot.get("status") == STATUS_ONLINE
+                data["sleeping"] = snapshot.get("status") == STATUS_SLEEP
+                data["properties_map"] = snapshot.get("properties_map", "")
+            else:
+                data["status"] = None
+                data["online"] = False
+                data["sleeping"] = True
+        except ImouAPIError as err:
+            _LOGGER.warning("Device list failed: %s", err)
+            data["last_error"] = str(err)
+            data["online"] = False
+            data["sleeping"] = True
             return data
 
-        if data["online"] == "4":
-            power_result = await self.api.async_get_device_power_info()
+        # 设备休眠时 IoT 调用会返回 10003,此时保留上次状态
+        try:
+            props = await self.api.async_get_properties(
+                self.device_id, self.product_id, self.channel_id
+            )
+        except ImouAPIError as err:
+            _LOGGER.warning("GetProperties failed: %s", err)
+            data["last_error"] = str(err)
+            data["props_ok"] = False
+            # 列表接口自带的 propertiesMap 是设备最近上报快照(设备休眠也可用)
+            props = await self._decode_properties_map(data.get("properties_map", ""))
+        else:
+            data["props_ok"] = True
 
-            if power_result and "electricitys" in power_result:
-                battery = power_result["electricitys"][0]
-                data["battery_level"] = battery.get("electric")
-                data["battery_type"] = battery.get("type")
+        data["props"] = props
 
-        _LOGGER.debug("Coordinator data: %s", data)
+        # ---- derived fields ------------------------------------------------
+        data["door_lock_status"] = _int_or_none(props.get("doorLockStatus"))
+        data["battery_lock"], data["battery_camera"] = extract_batteries(props)
+        data["wifi"] = normalize_wifi(props)
 
+        notes = props.get(PROP_LOCK_NOTE_REPORT) or []
+        if isinstance(notes, list):
+            data["lock_notes"] = notes
+            self._fire_new_lock_notes(notes)
+        else:
+            data["lock_notes"] = []
+
+        ch_names = props.get(PROP_CHANNEL_NAMES) or []
+        if isinstance(ch_names, list):
+            data["channel_names"] = {
+                str(c.get("chn")): c.get("name", "") for c in ch_names if isinstance(c, dict)
+            }
+        else:
+            data["channel_names"] = {}
+
+        _LOGGER.debug("Coordinator data updated: %s", data)
         return data
 
-    async def _async_update_device_info(self, now = None):
-        """Update firmware and model info."""
-        details = await self.api.async_get_device_details()
+    async def _decode_properties_map(self, raw: str) -> dict:
+        """Decode the device-list propertiesMap (ref-keyed snapshot) via model."""
+        if not raw:
+            return {}
+        try:
+            pm = json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(pm, dict):
+                return {}
+            model = await self.api.async_get_model(self.device_id, self.product_id)
+            return model.decode_properties(pm)
+        except (ImouAPIError, TypeError, ValueError, json.JSONDecodeError) as err:
+            _LOGGER.debug("propertiesMap decode failed: %s", err)
+            return {}
 
-        if not details:
-            return
+    def _fire_new_lock_notes(self, notes: list) -> None:
+        """Fire an event for each newly seen door-open record."""
+        for note in notes:
+            if not isinstance(note, dict):
+                continue
+            key = json.dumps(note, ensure_ascii=False)
+            if key in self._seen_lock_notes:
+                continue
+            self._seen_lock_notes.add(key)
+            record = dict(note)
+            record["device_id"] = self.device_id
+            self.hass.bus.async_fire(
+                EVENT_PREFIX, {"type": "open_record", "record": record}
+            )
 
-        version = details.get("deviceVersion")
-        model = details.get("deviceModel")
-        deviceId = details.get("deviceId")
-        brand = details.get("brand")
-
-        device_registry = dr.async_get(self.hass)
-
-        device_entry = device_registry.async_get_device(
-            identifiers = {(DOMAIN, self.device_id)}
+    @property
+    def is_locked(self) -> Optional[bool]:
+        """Derive HA lock state from doorLockStatus/doorLockState/lockState."""
+        data = self.data or {}
+        props = data.get("props", {})
+        return derive_lock_state(
+            data.get("door_lock_status"),
+            props.get("doorLockState"),
+            data.get("lock_state", ""),
         )
 
+    async def _async_update_device_info(self, now=None) -> None:
+        """Update the device registry entry (model / firmware)."""
+        try:
+            snapshot = await self.async_get_device_snapshot()
+        except ImouAPIError as err:
+            _LOGGER.debug("Device info refresh failed: %s", err)
+            return
+        if not snapshot:
+            return
+
+        registry = dr.async_get(self.hass)
+        device_entry = registry.async_get_device(identifiers={(DOMAIN, self.device_id)})
         if not device_entry:
             return
 
-        # 准备更新参数
-        update_kwargs = {}
+        update: dict = {}
+        if snapshot.get("model"):
+            update["model"] = snapshot["model"]
+        if snapshot.get("version"):
+            update["sw_version"] = snapshot["version"]
+        if snapshot.get("name"):
+            update["name"] = snapshot["name"]
+        if update:
+            registry.async_update_device(device_entry.id, **update)
 
-        if version:
-            update_kwargs["sw_version"] = version
-
-        if model:
-            update_kwargs["model"] = model
-
-        if brand:
-            update_kwargs["manufacturer"] = brand
-
-        if deviceId:
-            update_kwargs["serial_number"] = deviceId
-
-        if update_kwargs:
-            device_registry.async_update_device(device_entry.id, **update_kwargs)
-
-    async def async_update_device_info(self):
-        """Public method to trigger device info update."""
+    async def async_update_device_info(self) -> None:
+        """Public: refresh model/firmware in device registry."""
         await self._async_update_device_info()
 
-    async def async_shutdown(self):
+    async def async_shutdown(self) -> None:
         """Cleanup."""
-        if self._version_update_unsub:
-            self._version_update_unsub()
-            self._version_update_unsub = None
+        if self._device_info_update_unsub:
+            self._device_info_update_unsub()
+            self._device_info_update_unsub = None
+
+
+def _int_or_none(value: Any) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None

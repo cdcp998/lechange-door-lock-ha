@@ -1,40 +1,6 @@
-generate_snapkey:
-  name: Generate temporary password
-  description: Generate a temporary password for a door lock.
-  fields:
-    device_id:
-      name: Device ID
-      description: The device serial number.
-    name:
-      name: Key name
-      description: Name of the key.
-    effective_num:
-      name: Effective number
-      description: Number of times the key can be used (-1 for unlimited).
-    effective_day:
-      name: Effective days
-      description: Number of days the key is valid (1-90).
-    effect_period:
-      name: Effect period
-      description: List of periods with day, beginTime, endTime.
-    begin_time:
-      name: Begin time
-      description: Start time in HH:mm:ss format.
-    end_time:
-      name: End time
-      description: End time in HH:mm:ss format.
-
-get_snapkey_list:
-  name: Get temporary password list
-  description: Retrieve list of temporary passwords for a door lock.
-  fields:
-    device_id:
-      name: Device ID
-      description: The device serial number.
-
 open_door_remote:
   name: Remote open door
-  description: Remotely open the door lock.
+  description: "Remotely unlock the door lock (iot.control.SetService remoteOpenDoor)."
   fields:
     device_id:
       name: Device ID
@@ -42,19 +8,142 @@ open_door_remote:
 
 wake_up_device:
   name: Wake up device
-  description: Wake up a sleeping door lock.
+  description: Try to wake a sleeping door lock (clears the dormant flags).
   fields:
     device_id:
       name: Device ID
       description: The device serial number.
 
-get_open_door_record:
-  name: Get open door records
-  description: Retrieve recent door open records.
+call_answer:
+  name: Answer doorbell call
+  description: "Answer the doorbell call (CallAnswer); user_info comes from the call event."
   fields:
     device_id:
       name: Device ID
       description: The device serial number.
+    user_info:
+      name: User info
+      description: Call context from the lechange_door_lock_event doorbell call event.
+
+call_refuse:
+  name: Refuse doorbell call
+  description: Refuse the doorbell call (CallRefuse).
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    index:
+      name: Index
+      description: Call index (0-255).
+    user_info:
+      name: User info
+      description: Call context from the event.
+
+call_hangup:
+  name: Hang up doorbell call
+  description: Hang up the doorbell call (CallHangup).
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    user_info:
+      name: User info
+      description: Call context from the event.
+
+get_voice_reply:
+  name: Get voice replies
+  description: "Fetch the voice reply list (GetVoiceReply), fired as lechange_door_lock_event voice_reply_list."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    relate_type:
+      name: Relate type
+      description: "0 device / 1 accessory / 2 reply / 3 local / 4 quickReply / 5 chime."
+
+set_voice_reply:
+  name: Set voice reply
+  description: Select the automatic voice reply for the doorbell (SetVoiceReply).
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    index:
+      name: Index
+      description: Reply index from get_voice_reply (0-256).
+    relate_type:
+      name: Relate type
+      description: Reply category (default 4 quickReply).
+    time_stab:
+      name: Time stamp
+      description: Request timestamp (0-999999).
+
+create_snapkey:
+  name: Create temporary password
+  description: "Generate a temporary password (CreateDeviceSnapkey), fired as lechange_door_lock_event snapkey_created."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    name:
+      name: Key name
+      description: Name of the key.
+    effect_times:
+      name: Effect days
+      description: Days the key is valid (-1 unlimited / 1-90).
+    number:
+      name: Use limit
+      description: Times the key can be used (-1 unlimited / 1-255).
+    effect_period:
+      name: Effect period
+      description: "List with period (0=Sunday..6=Saturday), beginTime, endTime."
+
+get_snapkey_list:
+  name: Get temporary password list
+  description: "Fetch the temporary password list (GetDeviceSnapkeys), fired as lechange_door_lock_event snapkey_list."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    offset:
+      name: Offset
+      description: Start position (0-255).
     count:
-      name: Number of records
-      description: How many recent records to retrieve (max 100).
+      name: Count
+      description: How many entries (1-255).
+
+get_open_door_record:
+  name: Get open door records
+  description: "Retrieve door open records from the polled lockNoteReport property, fired as lechange_door_lock_event open_door_records."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+
+set_properties:
+  name: Set properties
+  description: Generic IoT property write (iot.control.SetProperties).
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    properties:
+      name: Properties
+      description: 'Map of property identifier to value, e.g. {"child_lock": true}.'
+
+call_service:
+  name: Call IoT service
+  description: Generic IoT service call (iot.control.SetService) for advanced usage.
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    service_name:
+      name: Service name
+      description: Service identifier from the device model (e.g. StorageFormat, SetVoiceReply).
+    input_data:
+      name: Input data
+      description: Service input parameters.
+    channel_id:
+      name: Channel id
+      description: Channel for the service call (optional).

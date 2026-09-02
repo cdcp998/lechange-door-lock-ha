@@ -1,0 +1,13 @@
+# 协议逆向依据与全部实测记录(含账号、设备序列号、会话凭证等敏感信息)
+# 仅保存在本地,不随仓库公开 —— 组件实现依据见 README/API 说明
+API/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE
+.idea/
+*.iml

@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build component zip
+        run: |
+          mkdir -p dist
+          cd custom_components
+          zip -qr ../dist/lechange_door_lock.zip lechange_door_lock
+
+      - name: Extract changelog section for this tag
+        id: notes
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          python3 - "$TAG" <<'EOF' > "$GITHUB_WORKSPACE"/release_notes.md
+          import sys
+          tag = sys.argv[1]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          blocks = text.split("\n## ")
+          for block in blocks:
+              header = block.split("\n", 1)[0].strip()
+              if header.startswith("[" + tag + "]"):
+                  print("## " + block.strip(), end="")
+                  break
+          else:
+              print(text[:500])
+          EOF
+          wc -c "$GITHUB_WORKSPACE"/release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ github.ref_name }}"
+          body_path: "${{ github.workspace }}/release_notes.md"
+          files: dist/lechange_door_lock.zip
+          generate_release_notes: false

@@ -3,49 +3,130 @@
     "step": {
       "user": {
         "title": "Connect to LeChange",
-        "description": "Enter your LeChange application credentials.",
+        "description": "Enter your LeChange app account and password (client-side protocol, not Open Platform credentials).\n\n⚠️ This integration relies on an unofficial reverse-engineered protocol for personal use/research only. No warranty is provided and you accept all account/usage risks (see the disclaimer in the README).",
         "data": {
-          "app_id": "App ID",
-          "app_secret": "App Secret"
+          "username": "LeChange account",
+          "password": "Password"
         }
       },
       "device": {
         "title": "Select Device",
-        "description": "Select the device you want to add.",
+        "description": "Select the door lock device to add.",
         "data": {
           "device_id": "Device"
         }
       }
     },
     "error": {
-      "invalid_auth": "Invalid authentication credentials.",
-      "no_devices": "No lock devices found under this account.",
+      "invalid_auth": "Invalid account or password (or captcha required).",
+      "no_devices": "No devices found under this account.",
+      "network": "Network error, please retry later.",
       "unknown": "Unexpected error."
     },
     "abort": {
-      "already_configured": "Device is already configured."
+      "already_configured": "Device is already configured.",
+      "device_not_found": "Selected device was not found."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Camera (video) options",
+        "description": "Configure the RTSP source of the lock camera. Defaults to the cloud stream gateway saved during setup; rtsp_url takes precedence, then rtsp_host (LAN), leaving both empty uses the cloud default.",
+        "data": {
+          "rtsp_url": "Full RTSP/restream URL (optional)",
+          "rtsp_host": "LAN IP (empty = cloud stream gateway)",
+          "rtsp_port": "RTSP port",
+          "rtsp_username": "RTSP username",
+          "rtsp_password": "RTSP password",
+          "rtsp_subtype": "Stream (0 main / 1 sub)"
+        }
+      }
     }
   },
   "entity": {
+    "lock": {
+      "door_lock": {
+        "name": "Door lock"
+      }
+    },
     "sensor": {
-      "battery": {
-        "name": "Battery"
+      "battery_lock": {
+        "name": "Lock battery"
+      },
+      "battery_camera": {
+        "name": "Camera battery"
+      },
+      "door_state": {
+        "name": "Door state",
+        "state": {
+          "closed": "Closed",
+          "open": "Open",
+          "unknown": "Unknown"
+        }
+      },
+      "power_mode": {
+        "name": "Power mode",
+        "state": {
+          "0": "Normal",
+          "1": "Power saving",
+          "2": "Super saving",
+          "unknown": "Unknown"
+        }
+      },
+      "wifi_signal": {
+        "name": "WiFi signal",
+        "state": {
+          "0": "Abnormal",
+          "1": "No network",
+          "2": "Poor",
+          "3": "Fair",
+          "4": "Good"
+        }
+      },
+      "last_open": {
+        "name": "Last open record"
       }
     },
     "binary_sensor": {
       "online": {
         "name": "Online"
       },
-      "channel_online": {
-        "name": "Channel {channel_id} Online"
+      "sleeping": {
+        "name": "Sleeping"
+      },
+      "tamper": {
+        "name": "Tamper alarm"
+      },
+      "child_lock": {
+        "name": "Child lock"
+      },
+      "open_door_by_touch": {
+        "name": "Touch to open"
       }
     },
     "button": {
       "open_door": {
-        "name": "Remote Open"
+        "name": "Remote open"
       },
       "wake_up": {
-        "name": "Wake Up"
+        "name": "Wake up"
+      }
+    },
+    "switch": {
+      "child_lock": {
+        "name": "Child lock"
+      },
+      "call_transfer": {
+        "name": "Call transfer"
+      },
+      "open_door_by_touch": {
+        "name": "Touch to open"
+      }
+    },
+    "camera": {
+      "camera": {
+        "name": "Channel {channel_id} camera"
       }
     }
   }

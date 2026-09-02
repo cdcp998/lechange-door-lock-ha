@@ -1,40 +1,6 @@
-generate_snapkey:
-  name: 生成临时密码
-  description: 为门锁生成一个临时密码。
-  fields:
-    device_id:
-      name: 设备ID
-      description: 设备序列号。
-    name:
-      name: 密钥名称
-      description: 密钥的名称。
-    effective_num:
-      name: 有效次数
-      description: 密钥可使用的次数（-1为无限次）。
-    effective_day:
-      name: 有效天数
-      description: 密钥有效的天数（1-90）。
-    effect_period:
-      name: 生效时间段
-      description: 生效的时间段列表，包含星期几、开始时间、结束时间。
-    begin_time:
-      name: 开始时间
-      description: 开始时间，格式 HH:mm:ss。
-    end_time:
-      name: 结束时间
-      description: 结束时间，格式 HH:mm:ss。
-
-get_snapkey_list:
-  name: 获取临时密码列表
-  description: 获取门锁的临时密码列表。
-  fields:
-    device_id:
-      name: 设备ID
-      description: 设备序列号。
-
 open_door_remote:
   name: 远程开门
-  description: 远程打开门锁。
+  description: 远程解锁门锁(iot.control.SetService remoteOpenDoor)。
   fields:
     device_id:
       name: 设备ID
@@ -42,19 +8,142 @@ open_door_remote:
 
 wake_up_device:
   name: 唤醒设备
-  description: 唤醒休眠的门锁设备。
+  description: 尝试唤醒休眠的门锁(清除休眠标志)。
   fields:
     device_id:
       name: 设备ID
       description: 设备序列号。
 
-get_open_door_record:
-  name: 获取开门记录
-  description: 获取最近的开门记录。
+call_answer:
+  name: 应答门铃呼叫
+  description: 应答门铃呼叫(CallAnswer),user_info 来自呼叫事件。
   fields:
     device_id:
       name: 设备ID
       description: 设备序列号。
+    user_info:
+      name: 呼叫信息
+      description: lechange_door_lock_event 门铃呼叫事件中的呼叫上下文。
+
+call_refuse:
+  name: 拒绝门铃呼叫
+  description: 拒绝门铃呼叫(CallRefuse)。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    index:
+      name: 呼叫序号
+      description: 呼叫序号(0-255)。
+    user_info:
+      name: 呼叫信息
+      description: 事件中的呼叫上下文。
+
+call_hangup:
+  name: 挂断门铃呼叫
+  description: 挂断门铃呼叫(CallHangup)。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    user_info:
+      name: 呼叫信息
+      description: 事件中的呼叫上下文。
+
+get_voice_reply:
+  name: 获取语音回复列表
+  description: 获取语音回复列表(GetVoiceReply),结果以 lechange_door_lock_event voice_reply_list 事件发出。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    relate_type:
+      name: 关联类型
+      description: 0 device / 1 accessory / 2 reply / 3 local / 4 quickReply / 5 chime。
+
+set_voice_reply:
+  name: 设置语音回复
+  description: 设置门铃自动语音回复(SetVoiceReply)。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    index:
+      name: 回复序号
+      description: 通过 get_voice_reply 获取的回复序号(0-256)。
+    relate_type:
+      name: 关联类型
+      description: 回复分类(默认 4 quickReply)。
+    time_stab:
+      name: 时间戳
+      description: 请求时间戳(0-999999),同请求内一致即可。
+
+create_snapkey:
+  name: 生成临时密码
+  description: 生成临时密码(CreateDeviceSnapkey),结果以 lechange_door_lock_event snapkey_created 事件发出。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    name:
+      name: 密钥名称
+      description: 密钥的名称。
+    effect_times:
+      name: 有效天数
+      description: 密钥有效的天数(-1 无限 / 1-90)。
+    number:
+      name: 使用次数
+      description: 密钥可使用次数(-1 无限 / 1-255)。
+    effect_period:
+      name: 生效时间段
+      description: 时间段列表,元素含 period(0=周日..6=周六)、beginTime、endTime。
+
+get_snapkey_list:
+  name: 获取临时密码列表
+  description: 获取临时密码列表(GetDeviceSnapkeys),结果以 lechange_door_lock_event snapkey_list 事件发出。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    offset:
+      name: 起始位置
+      description: 起始偏移(0-255)。
     count:
-      name: 记录数量
-      description: 获取最近多少条记录（最多100条）。
+      name: 数量
+      description: 获取条数(1-255)。
+
+get_open_door_record:
+  name: 获取开门记录
+  description: 获取最近的开门记录(来自轮询的 lockNoteReport 属性),以 lechange_door_lock_event open_door_records 事件发出。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+
+set_properties:
+  name: 设置设备属性
+  description: 通用 IoT 属性写入(iot.control.SetProperties)。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    properties:
+      name: 属性
+      description: '属性名到值的映射,例如 {"child_lock": true}。'
+
+call_service:
+  name: 调用 IoT 服务
+  description: 通用 IoT 服务调用(iot.control.SetService),供高级使用。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    service_name:
+      name: 服务名
+      description: 设备型号定义中的服务标识(如 StorageFormat、SetVoiceReply)。
+    input_data:
+      name: 入参
+      description: 服务输入参数。
+    channel_id:
+      name: 通道
+      description: 服务调用通道(可选)。
