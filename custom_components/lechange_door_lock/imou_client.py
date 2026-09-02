@@ -198,27 +198,12 @@ class ImouClient:
     def _key2(self) -> str:
         return _sha256_hex_lower(self.token) if self.token else ""
 
-    async def async_login(self, username: str, password: str) -> dict:
-        """Account/password login -> {sessionId, token, username, userId, host}."""
-        body = json.dumps(
-            {"data": {"gpsInfo": {"latitude": 0, "longitude": 0}}},
-            separators=(",", ":"),
-        ).encode()
-        key1 = _md5_hex_lower(_md5_hex_lower(password))
-        key2 = _sha256_hex_lower(_sha256_hex_lower(password))
-        headers = _sign_payload(
-            "POST", API_PREFIX + "user.account.GetToken", body,
-            "account\\" + username, key1, key2,
-        )
-        data = await self._http_post(self.api_host, API_PREFIX + "user.account.GetToken",
-                                     body, headers)
-        # _http_post 已解包 data 层,这里 data 即业务对象 {sessionId, token, username, ...}
+    async def _apply_login_response(self, account: str, data: dict) -> dict:
+        """GetToken/GetTokenBySMS 成功后的统一收尾(会话/密钥切换/区域网关)."""
         d = data if isinstance(data, dict) else {}
         session_id = d.get("sessionId") or ""
         if not session_id:
             raise ImouAPIError(-1, "no sessionId in login response")
-        self.username = username
-        self.password = password
         self.session_id = session_id
         self.token = d.get("token") or ""
         self.internal_username = d.get("username") or ""
@@ -244,7 +229,62 @@ class ImouClient:
             "username": self.internal_username,
             "user_id": d.get("userId"),
             "host": self.api_host,
+            "account": account,
         }
+
+    async def async_login(self, username: str, password: str) -> dict:
+        """账号密码登录 -> {sessionId, token, username, userId, host}."""
+        body = json.dumps(
+            {"data": {"gpsInfo": {"latitude": 0, "longitude": 0}}},
+            separators=(",", ":"),
+        ).encode()
+        key1 = _md5_hex_lower(_md5_hex_lower(password))
+        key2 = _sha256_hex_lower(_sha256_hex_lower(password))
+        headers = _sign_payload(
+            "POST", API_PREFIX + "user.account.GetToken", body,
+            "account\\" + username, key1, key2,
+        )
+        data = await self._http_post(self.api_host, API_PREFIX + "user.account.GetToken",
+                                     body, headers)
+        self.username = username
+        self.password = password
+        # _http_post 已解包 data 层,这里 data 即业务对象 {sessionId, token, ...}
+        return await self._apply_login_response(username, data)
+
+    # ------------------------------------------------------- 短信验证码登录
+    async def async_send_sms_code(self, account: str, area_code: str = "") -> dict:
+        """发送短信验证码 (common.validcode.GetValidCode, App 源码取证).
+
+        依据: q40/c.java → type=AccountType.type("phone"), usage=Usage.name
+              (登录/绑定场景 usage 枚举名,登录取 "ChangeAccount")。
+        """
+        return await self.async_post(
+            "common.validcode.GetValidCode",
+            {"account": account, "areaCode": area_code, "type": "phone",
+             "usage": "ChangeAccount"},
+        )
+
+    async def async_login_sms(self, account: str, valid_code: str, area_code: str = "") -> dict:
+        """短信验证码登录 (user.account.GetTokenBySMS, App 源码取证).
+
+        请求: {account, areaCode, validCode};响应与 GetToken 同构
+        ({sessionId, token, username, entryUrlV2, newUser}) → 同一套密钥切换。
+        """
+        body = json.dumps(
+            {"data": {"account": account, "areaCode": area_code, "validCode": valid_code}},
+            separators=(",", ":"),
+        ).encode()
+        key1 = _md5_hex_lower(_md5_hex_lower(valid_code))
+        key2 = _sha256_hex_lower(_sha256_hex_lower(valid_code))
+        headers = _sign_payload(
+            "POST", API_PREFIX + "user.account.GetTokenBySMS", body,
+            "account\\" + account, key1, key2,
+        )
+        data = await self._http_post(self.api_host, API_PREFIX + "user.account.GetTokenBySMS",
+                                     body, headers)
+        self.username = account
+        self.password = ""  # 短信登录无密码,自动重登不可用(需重新配置)
+        return await self._apply_login_response(account, data)
 
     async def async_ensure_session(self) -> None:
         """Re-login when the stored session is missing/expired."""

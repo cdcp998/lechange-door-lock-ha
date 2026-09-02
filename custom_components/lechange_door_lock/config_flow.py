@@ -40,22 +40,47 @@ from .imou_client import ImouAPIError, ImouClient
 
 _LOGGER = logging.getLogger(__name__)
 
-STEP_USER_DATA_SCHEMA = vol.Schema(
+LOGIN_METHOD_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_USERNAME): cv.string,
-        vol.Required(CONF_PASSWORD): cv.string,
+        vol.Required("login_method", default="password"): vol.In(["password", "sms"]),
     }
 )
 
+PASSWORD_SCHEMA = vol.Schema({vol.Required(CONF_PASSWORD): cv.string})
+SMS_CODE_SCHEMA = vol.Schema({vol.Required("valid_code"): cv.string})
+
 
 async def http_login(username: str, password: str) -> dict:
-    """Login via the client-side API; returns session dict."""
+    """Password login via the client-side API; returns session dict."""
     async with aiohttp.ClientSession() as session:
         client = ImouClient(session)
         data = await client.async_login(username, password)
         data["username_input"] = username
         data["password_input"] = password
         return data
+
+
+async def http_login_sms(username: str, valid_code: str) -> dict:
+    """SMS verification-code login via GetTokenBySMS."""
+    async with aiohttp.ClientSession() as session:
+        client = ImouClient(session)
+        data = await client.async_login_sms(username, valid_code)
+        data["username_input"] = username
+        data["password_input"] = ""
+        return data
+
+
+async def http_send_code(username: str) -> bool:
+    """Best-effort SMS code send (GetValidCode); failure is non-fatal."""
+    async with aiohttp.ClientSession() as session:
+        client = ImouClient(session)
+        try:
+            await client.async_send_sms_code(username)
+            return True
+        except (ImouAPIError, aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.debug("GetValidCode failed (user may obtain code in app): %s", err)
+            return False
 
 
 async def http_list_devices(username: str, password: str, session_data: dict) -> list[dict]:
@@ -73,6 +98,21 @@ async def http_list_devices(username: str, password: str, session_data: dict) ->
         return await client.async_get_devices()
 
 
+def _login_error(err: ImouAPIError) -> str:
+    """Map login error codes to a config-flow error key."""
+    if err.code == -4:
+        return "no_devices"
+    if err.code in (-2, -3):
+        return "network"
+    if err.code in (2026, 2032, 2016):
+        return "sms_needed"      # 需要短信验证码/双因素验证
+    if err.code in (2033, 2036):
+        return "captcha_needed"  # 需要人机验证(极验)
+    if err.code in (2011, 2015, 3036):
+        return "invalid_auth"
+    return "invalid_auth"
+
+
 class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Account + password -> device selection."""
 
@@ -81,39 +121,73 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         self._login_data: dict = {}
         self._devices: list[dict] = []
+        self._username: str = ""
 
     async def async_step_user(self, user_input: Optional[dict] = None) -> FlowResult:
+        """选择登录方式:密码或短信验证码."""
         errors = {}
         if user_input is not None:
-            username = user_input[CONF_USERNAME].strip()
-            password = user_input[CONF_PASSWORD]
+            self._username = user_input[CONF_USERNAME].strip()
+            if user_input["login_method"] == "sms":
+                return await self.async_step_sms()
+            return await self.async_step_password()
+        return self.async_show_form(step_id="user", data_schema=LOGIN_METHOD_SCHEMA, errors=errors)
+
+    async def async_step_password(self, user_input: Optional[dict] = None) -> FlowResult:
+        """账号密码登录(失败提示验证码类错误)."""
+        errors = {}
+        if user_input is not None:
             try:
-                login_data = await http_login(username, password)
-                devices = await http_list_devices(username, password, login_data)
-                devices.sort(key=lambda d: (not ImouClient.is_lock(d), d["name"]))
-                if not devices:
-                    raise ImouAPIError(-4, "no devices")
-                self._login_data = login_data
-                self._devices = devices
-                return await self.async_step_device()
+                login_data = await http_login(self._username, user_input[CONF_PASSWORD])
+                return await self._after_login(login_data)
             except ImouAPIError as err:
                 _LOGGER.error("Login failed: %s", err)
-                if err.code == -4:
-                    errors["base"] = "no_devices"
-                elif err.code in (-2, -3):
-                    errors["base"] = "network"
-                else:
-                    errors["base"] = "invalid_auth"
+                errors["base"] = _login_error(err)
             except (aiohttp.ClientError, TimeoutError) as err:
                 _LOGGER.error("Login network error: %s", err)
                 errors["base"] = "network"
             except Exception as err:  # noqa: BLE001
                 _LOGGER.exception("Unexpected login error: %s", err)
                 errors["base"] = "unknown"
-
         return self.async_show_form(
-            step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
+            step_id="password", data_schema=PASSWORD_SCHEMA, errors=errors,
+            description_placeholders={"username": self._username},
         )
+
+    async def async_step_sms(self, user_input: Optional[dict] = None) -> FlowResult:
+        """短信验证码登录:提示先在乐橙 App 获取验证码(自动发送 best-effort)."""
+        errors = {}
+        if user_input is None:
+            await http_send_code(self._username)  # best-effort,失败仅提示
+            return self.async_show_form(
+                step_id="sms", data_schema=SMS_CODE_SCHEMA,
+                description_placeholders={"username": self._username},
+            )
+        try:
+            login_data = await http_login_sms(self._username, user_input["valid_code"])
+            return await self._after_login(login_data)
+        except ImouAPIError as err:
+            _LOGGER.error("SMS login failed: %s", err)
+            errors["base"] = _login_error(err)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.error("SMS login network error: %s", err)
+            errors["base"] = "network"
+        return self.async_show_form(
+            step_id="sms", data_schema=SMS_CODE_SCHEMA, errors=errors,
+            description_placeholders={"username": self._username},
+        )
+
+    async def _after_login(self, login_data: dict) -> FlowResult:
+        """登录成功 → 拉取设备列表 → 设备选择."""
+        devices = await http_list_devices(
+            login_data["username_input"], login_data.get("password_input", ""), login_data
+        )
+        devices.sort(key=lambda d: (not ImouClient.is_lock(d), d["name"]))
+        if not devices:
+            raise ImouAPIError(-4, "no devices")
+        self._login_data = login_data
+        self._devices = devices
+        return await self.async_step_device()
 
     async def async_step_device(self, user_input: Optional[dict] = None) -> FlowResult:
         if user_input is not None:

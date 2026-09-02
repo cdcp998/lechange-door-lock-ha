@@ -10,6 +10,19 @@
 
 ---
 
+## [1.5.0] - 2026-09-03
+
+### 新增(短信验证码登录)
+- 配置向导支持**两种登录方式**:**账号密码** / **短信验证码**(App 源码取证:
+  `user.account.GetTokenBySMS` {account, areaCode, validCode},响应与 GetToken 同构,
+  登录后同一套密钥切换 md5(token)/sha256(token))。
+- 短信流程:输入账号 → 提示在乐橙 App 获取验证码(集成 best-effort 尝试自动发送
+  `common.validcode.GetValidCode` {type:"phone", usage:"ChangeAccount"},未登录签名
+  未取证成功时引导手动获取)→ 输入 6 位验证码登录。
+- **密码登录失败定向提示**:错误码映射 `sms_needed`(2026/2032/2016 需短信/两步验证,
+  引导改用短信登录)与 `captcha_needed`(2033/2036 需极验人机验证)。
+- 说明:短信登录无密码,会话失效后需重新配置。
+
 ## [1.4.0] - 2026-09-03
 
 ### 依据(抓包文件)

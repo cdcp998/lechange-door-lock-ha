@@ -224,6 +224,44 @@ class TestHttpPostAndErrors:
         assert err.value.code == 11010
 
 
+class TestSmsLogin:
+    async def test_send_sms_code_payload(self):
+        session = FakeSession({"common.validcode.GetValidCode": lambda: _resp({"code": 10000, "data": {}})})
+        client = ImouClient(session, session_id="s", token="t", internal_username="u",
+                            api_host="https://gw.example.com")
+        await client.async_send_sms_code("13800000000")
+        assert session.calls == ["common.validcode.GetValidCode"]
+
+    async def test_login_sms_sets_session(self):
+        session = FakeSession({
+            "user.account.GetTokenBySMS": lambda: _resp({
+                "code": 10000,
+                "data": {"sessionId": "S-sms", "token": "T-sms", "username": "lc1n_sms",
+                         "newUser": False, "entryUrlV2": "https://gw.example.com:443"},
+            }),
+            "user.account.Login": lambda: _resp({"code": 10000, "data": {}}),
+        })
+        client = ImouClient(session, api_host="https://gw.example.com")
+        data = await client.async_login_sms("13800000000", "123456")
+        assert data["session_id"] == "S-sms"
+        assert client.session_id == "S-sms"
+        assert client.internal_username == "lc1n_sms"
+        assert client.token == "T-sms"
+        # 短信登录无密码:自动重登不可用
+        assert client.password == ""
+        # 密钥派生与 GetToken 一致(md5/sha256(token))
+        assert client._key1 == hashlib.md5(b"T-sms").hexdigest().lower()
+
+    async def test_login_sms_no_session_raises(self):
+        session = FakeSession({
+            "user.account.GetTokenBySMS": lambda: _resp({"code": 2011, "desc": "invalid code"})
+        })
+        client = ImouClient(session, api_host="https://gw.example.com")
+        with pytest.raises(ImouAPIError) as err:
+            await client.async_login_sms("13800000000", "000000")
+        assert err.value.code == 2011
+
+
 class TestGetDevicesNormalization:
     async def test_full_normalization(self):
         device_payload = {
