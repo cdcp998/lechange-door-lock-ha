@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
+from datetime import datetime
+from pathlib import Path
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .camera import LeChangeCameraEntity
 from .const import DOMAIN, EVENT_PREFIX
 
 _LOGGER = logging.getLogger(__name__)
@@ -20,7 +22,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     device_id = entry.data["device_id"]
     entities = [
         LeChangeOpenDoorButton(coordinator, device_id),
-        LeChangeWakeUpButton(coordinator, device_id),
+        LeChangeSnapshotDoorButton(coordinator, device_id),
         LeChangeGenerateSnapkeyButton(coordinator, device_id),
         LeChangeRefreshSnapkeyListButton(coordinator, device_id),
     ]
@@ -60,38 +62,55 @@ class LeChangeOpenDoorButton(_BaseLeChangeButton):
         await coordinator.async_request_refresh()
 
 
-class LeChangeWakeUpButton(_BaseLeChangeButton):
-    """唤醒休眠设备 (清除休眠/省电标志后刷新)."""
+class LeChangeSnapshotDoorButton(_BaseLeChangeButton):
+    """获取门外截图:拉取摄像头(门铃常在线)即唤醒锁体,快照保存到 HA www/ 目录."""
+
+    _attr_icon = "mdi:camera"
 
     def __init__(self, coordinator, device_id: str) -> None:
-        super().__init__(coordinator, device_id, "wake_up")
+        super().__init__(coordinator, device_id, "snapshot_door")
+        self._attr_translation_placeholders = {"channel_id": "0"}
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {
+            "last_snapshot_url": str(
+                self.coordinator.entry.options.get("last_snapshot_url", "")
+            )
+        }
 
     async def async_press(self) -> None:
         coordinator = self.coordinator
-        errors = []
-        for prop in ("Dormant", "sleepStatus"):
-            try:
-                await coordinator.api.async_set_properties(
-                    coordinator.device_id, coordinator.product_id, {prop: False}
-                )
-            except Exception as err:  # noqa: BLE001 — best effort
-                _LOGGER.debug("Wake via %s failed: %s", prop, err)
-                errors.append(str(err))
+        image = await LeChangeCameraEntity.capture_image_via_options(coordinator, "0")
+        if not image:
+            raise HomeAssistantError(
+                "获取门外截图失败:请确认集成选项已配置局域网 rtsp_host(及 RTSP 凭据)且设备在线"
+            )
+        www = Path(coordinator.hass.config.path("www"))
+        (www / "lechange").mkdir(parents=True, exist_ok=True)
+        filename = f"lechange_{self._device_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        (www / "lechange" / filename).write_bytes(image)
+        url = f"/local/lechange/{filename}"
+        # 记录最近一次快照地址
+        if isinstance(coordinator.entry.options, dict):
+            coordinator.hass.config_entries.async_update_entry(
+                coordinator.entry, options={**coordinator.entry.options, "last_snapshot_url": url}
+            )
         coordinator.hass.bus.async_fire(
             EVENT_PREFIX,
-            {"type": "wake_up", "device_id": self._device_id, "errors": errors},
+            {"type": "snapshot", "device_id": self._device_id, "url": url,
+             "bytes": len(image)},
         )
-        if not errors:
-            async def delayed_refresh():
-                await asyncio.sleep(10)
-                await coordinator.async_request_refresh()
-            self.hass.async_create_task(delayed_refresh())
-        else:
-            raise HomeAssistantError(f"Wake up device failed: {errors}")
+        self.async_write_ha_state()
+        _LOGGER.info("Door snapshot saved: %s (%d bytes)", url, len(image))
 
 
 class LeChangeGenerateSnapkeyButton(_BaseLeChangeButton):
-    """按实体化配置(名称/次数/天数/星期/时间段)生成临时密码."""
+    """按实体化配置(名称/次数/天数/星期/时间段)生成临时密码.
+
+    纯消息域云 API(iot.message.SmartLockSecretAdd):客户端自产 keyId/tempKey,
+    不使用 iot.control.SetService(避免触发身份验证码),设备休眠也可用。
+    """
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "generate_snapkey")
@@ -108,7 +127,7 @@ class LeChangeGenerateSnapkeyButton(_BaseLeChangeButton):
 
     async def async_press(self) -> None:
         coordinator = self.coordinator
-        # 抓包验证的云消息 API:设备休眠也可生成临时密码
+        # 抓包/测试报告(R14)验证:客户端生成 tempKey,经消息域 Add 直接登记
         result = await coordinator.async_create_snapkey_cloud()
         coordinator.set_snapkey_result(result)
         coordinator.hass.bus.async_fire(
@@ -121,14 +140,13 @@ class LeChangeGenerateSnapkeyButton(_BaseLeChangeButton):
 
 
 class LeChangeRefreshSnapkeyListButton(_BaseLeChangeButton):
-    """按需拉取当前临时密码列表."""
+    """按需拉取当前临时密码分组列表(消息域,设备休眠可用)."""
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "refresh_snapkey_list")
 
     async def async_press(self) -> None:
         coordinator = self.coordinator
-        # 抓包验证的云消息 API:设备休眠也可查询临时密码分组
         result = await coordinator.api.async_smart_lock_secret_list(
             coordinator.device_id, coordinator.product_id, types=3
         )

@@ -147,19 +147,24 @@ class LeChangeCameraEntity(CoordinatorEntity, Camera):
     ) -> bytes | None:
         """Snapshot via the Dahua CGI on the LAN (cloud gateway has no CGI).
 
-        Best effort: only when the effective host is a LAN IPv4 address.
+        拉取摄像头本身即唤醒锁体(门铃常在线);仅局域网 IPv4 时生效。
         """
-        host, _ = self._host_and_port()
+        return await self.capture_image_via_options(self.coordinator, self._channel_id)
+
+    @staticmethod
+    async def capture_image_via_options(coordinator, channel_id: str) -> bytes | None:
+        """按集成选项(rtsp_host/凭据)抓拍门外画面;返回图片字节或 None."""
+        opts = coordinator.entry.options or {}
+        host = str(opts.get(CONF_RTSP_HOST) or "").strip()
         if not host or not is_lan_host(host):
             return None
-        opts = self._options
         user = str(opts.get(CONF_RTSP_USERNAME, "admin")).strip()
         pw = str(opts.get(CONF_RTSP_PASSWORD, "")).strip()
-        channel = int(self._channel_id) + 1
+        channel = int(channel_id) + 1
         url = f"http://{host}/cgi-bin/snapshot.cgi?channel={channel}&subtype=0"
         try:
             auth = aiohttp.BasicAuth(user, pw) if user else None
-            resp = await self.coordinator.api._session.get(url, auth=auth, timeout=10)
+            resp = await coordinator.api._session.get(url, auth=auth, timeout=10)
             if resp.status == 200:
                 return await resp.read()
             _LOGGER.debug("Snapshot HTTP %s from %s", resp.status, host)

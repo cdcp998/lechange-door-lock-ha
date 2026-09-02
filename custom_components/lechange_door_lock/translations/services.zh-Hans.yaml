@@ -120,6 +120,20 @@ get_open_door_record:
       name: 设备ID
       description: 设备序列号。
 
+delete_snapkey:
+  name: 删除临时密码
+  description: 删除临时密码(iot.message.SmartLockSecretDelete,消息域;extra 可传全字段以便可靠删除)。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    key_id:
+      name: 密钥ID
+      description: 临时密码的 keyId(刷新临时密码列表/快照可得)。
+    extra:
+      name: 附加字段
+      description: 可选全字段(type/name/group/usagePeriod...),删除更可靠。
+
 set_properties:
   name: 设置设备属性
   description: 通用 IoT 属性写入(iot.control.SetProperties)。

@@ -22,10 +22,13 @@ from .const import (
     SERVICE_CALL_REFUSE,
     SERVICE_CALL_SERVICE,
     SERVICE_GENERATE_SNAPKEY,
+    SERVICE_DELETE_SNAPKEY,
     SERVICE_GET_OPEN_DOOR_RECORD,
     SERVICE_GET_SNAPKEY_LIST,
     SERVICE_GET_VOICE_REPLY,
     SERVICE_OPEN_DOOR_REMOTE,
+    SERVICE_SEND_SMS_CODE,
+    SERVICE_AUTHORIZE_TERMINAL,
     SERVICE_SET_PROPERTIES,
     SERVICE_SET_VOICE_REPLY,
     SERVICE_WAKE_UP_DEVICE,
@@ -105,6 +108,30 @@ GET_SNAPKEY_LIST_SCHEMA = vol.Schema(
 )
 
 GET_OPEN_DOOR_RECORD_SCHEMA = vol.Schema({vol.Required("device_id"): cv.string})
+
+DELETE_SNAPKEY_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): cv.string,
+        vol.Required("key_id"): vol.All(vol.Coerce(int), vol.Range(min=0)),
+        vol.Optional("extra", default={}): dict,
+    }
+)
+
+SEND_SMS_CODE_SCHEMA = vol.Schema(
+    {
+        vol.Required("account"): cv.string,
+        vol.Optional("usage", default="GrantingCredit"): vol.In(
+            ["GrantingCredit", "SMSLogin", "GenerateSnapkey", "ChangeAccount"]
+        ),
+    }
+)
+
+AUTHORIZE_TERMINAL_SCHEMA = vol.Schema(
+    {
+        vol.Required("account"): cv.string,
+        vol.Required("valid_code"): cv.string,
+    }
+)
 
 SET_PROPERTIES_SCHEMA = vol.Schema(
     {
@@ -299,6 +326,59 @@ async def async_get_open_door_record(call: ServiceCall):
     _fire_event(hass, "open_door_records", device_id, records=records)
 
 
+async def async_delete_snapkey(call: ServiceCall):
+    """删除临时密码 (iot.message.SmartLockSecretDelete, 消息域;尽量全字段)."""
+    hass, device_id = call.hass, call.data["device_id"]
+    coordinator = _get_coordinator(hass, device_id)
+    if not coordinator:
+        raise HomeAssistantError(f"Device {device_id} not found")
+    result = await coordinator.api.async_smart_lock_secret_delete(
+        coordinator.device_id,
+        coordinator.product_id,
+        call.data["key_id"],
+        extra=call.data.get("extra") or {},
+    )
+    _fire_event(hass, "snapkey_deleted", device_id, key_id=call.data["key_id"], result=result)
+    await coordinator.async_request_refresh()
+
+
+async def async_send_sms_code(call: ServiceCall):
+    """发送短信/邮箱验证码 (GetValidCode, 会话提交实测 10000).
+
+    usage 与业务一一对应:GrantingCredit(终端授权,默认)/ GenerateSnapkey /
+    SMSLogin 等。结果经事件 sms_code_sent 返回。
+    """
+    hass = call.hass
+    coordinator = _first_coordinator(hass)
+    if coordinator is None:
+        raise HomeAssistantError("未找到已配置的集成(发送验证码需登录会话)")
+    await coordinator.api.async_send_sms_code(call.data["account"], usage=call.data["usage"])
+    _fire_event(hass, "sms_code_sent", call.data["account"], usage=call.data["usage"])
+
+
+async def async_authorize_terminal(call: ServiceCall):
+    """终端授权提交 (user.account.GrantingCredit, App 源码取证 + 实测).
+
+    实测(2026-09-03):发送验证码(usage=GrantingCredit)10000 ✅;
+    提交 → 账号未开终端管理=11001 bad request;App 专用未登录上下文=11010/11001。
+    失败时请改在乐橙 App 完成授权(登录页触发终端管理验证)。
+    """
+    hass = call.hass
+    coordinator = _first_coordinator(hass)
+    if coordinator is None:
+        raise HomeAssistantError("未找到已配置的集成(需登录会话)")
+    result = await coordinator.api.async_granting_credit(
+        call.data["account"], call.data["valid_code"]
+    )
+    _fire_event(hass, "terminal_authorized", call.data["account"], result=result)
+
+
+def _first_coordinator(hass: HomeAssistant):
+    for coordinator in hass.data.get(DOMAIN, {}).values():
+        return coordinator
+    return None
+
+
 async def async_set_properties(call: ServiceCall):
     """通用属性设置 (iot.control.SetProperties)."""
     hass, device_id = call.hass, call.data["device_id"]
@@ -365,6 +445,18 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, SERVICE_GET_SNAPKEY_LIST, async_get_snapkey_list, schema=GET_SNAPKEY_LIST_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_DELETE_SNAPKEY, async_delete_snapkey, schema=DELETE_SNAPKEY_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_SEND_SMS_CODE, async_send_sms_code, schema=SEND_SMS_CODE_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_AUTHORIZE_TERMINAL,
+        async_authorize_terminal,
+        schema=AUTHORIZE_TERMINAL_SCHEMA,
     )
     hass.services.async_register(
         DOMAIN,

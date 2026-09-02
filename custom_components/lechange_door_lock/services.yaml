@@ -263,6 +263,35 @@ get_open_door_record:
       selector:
         text:
 
+delete_snapkey:
+  name: Delete temporary password
+  description: Remove a temporary password (iot.message.SmartLockSecretDelete, message domain; pass full fields via extra for reliable removal).
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+      required: true
+      example: "600EBBDRSF00000"
+      selector:
+        text:
+    key_id:
+      name: Key ID
+      description: Key id of the temporary password (from refresh_snapkey_list / snapkey list).
+      required: true
+      example: 67330355
+      selector:
+        number:
+          min: 0
+          max: 999999999
+          step: 1
+    extra:
+      name: Extra fields
+      description: Optional full key fields (type/name/group/usagePeriod...) for reliable deletion.
+      required: false
+      default: {}
+      selector:
+        object:
+
 set_properties:
   name: Set properties
   description: Generic IoT property write (iot.control.SetProperties).

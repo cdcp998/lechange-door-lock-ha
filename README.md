@@ -31,10 +31,10 @@
 - **开门信息**：最近开门时间（格式化）与最近开门方式（密码/卡片/指纹/远程…），来自 `lockNoteReport`。
 - **安全传感器**：在线状态、通道在线状态、休眠状态、防拆报警、童锁、触屏开门。
 - **控制开关**：童锁、呼叫转接、触屏开门（`iot.control.SetProperties`）。
-- **远程控制**：远程开门、唤醒设备按钮。
+- **远程控制**：远程开门按钮;**「获取门外截图」按钮**(替代原“唤醒设备”——无效操作;拉取摄像头/门铃即唤醒锁体,快照保存到 `www/lechange/` 并经 `/local/...` URL 事件返回)。
 - **📹 视频**：每个摄像头通道生成 camera 实体，默认使用云端流媒体网关地址，支持局域网 RTSP / go2rtc 中转（在集成选项里配置地址）。
 - **🗣️ 对话**：应答/拒绝/挂断门铃呼叫（CallAnswer/CallRefuse/CallHangup）、获取/设置语音回复（GetVoiceReply/SetVoiceReply）。
-- **🔑 临时密码**：**实体化配置**（名称/使用次数/有效天数/生效星期/时间段，number·select·text·time 四类实体）+「生成临时密码」「刷新列表」按钮 + 数量传感器；基于抓包验证的云消息 API（`iot.message.SmartLockSecretAdd/ListV2`），**设备休眠也可生成**；兼容 `create_snapkey`/`get_snapkey_list` 服务。
+- **🔑 临时密码**：**实体化配置**（名称/使用次数/有效天数/生效星期/时间段，number·select·text·time 四类实体）+「生成临时密码」「刷新列表」「删除」按钮服务 + 数量传感器；基于消息域云 API（`iot.message.SmartLockSecretAdd/ListV2/Delete`），**设备休眠可用、客户端自产密码、不触发短信验证码**。
 - **云侧告警**：轮询 `cloud.message.GetDeviceAlarmMixMessage`（抓包验证，设备休眠照常返回），新告警触发 `alarm` 事件，`最新告警` 传感器展示标签/时间/消息。
 - **开门记录**：轮询 `lockNoteReport` 属性，新记录会触发事件。
 - **会话自动续期**：会话失效时自动使用存储的账号密码重新登录。
@@ -53,8 +53,9 @@
 1. 进入 **设置 → 设备与服务 → 添加集成 → LeChange Door Lock**。
 2. 输入您的**乐橙 App 账号**,并选择登录方式:
    - **账号密码**:输入 App 密码;若提示"需要短信验证码/两步验证",改用下方方式。
-   - **短信验证码**:先在乐橙 App(短信验证码登录 / 忘记密码页)获取 6 位验证码,再输入登录
-     (集成也会尝试自动发送,失败时请以 App 收到的为准)。
+   - **短信验证码**:先在乐橙 App(短信验证码登录 / 忘记密码页)获取 6 位验证码,再输入登录。
+     ⚠️ 自动发送实测(2026-09-03):登录类 usage 被风控拦截(**12114 need geetest4 captcha
+     verify**,服务端下发 verifyToken);GenerateSnapkey 类可直发(10000)——请以 App 收到的短信为准。
 3. 自动登录并列出账号下设备,选择门锁完成配置。
 
 > ⚠️ 密码仅用于登录与失效后自动重登，存储在 HA 配置条目中，请自行评估安全风险。
@@ -85,7 +86,7 @@
 | 传感器 | 临时密码数量（属性含列表与最近生成） | `sensor.<name>_snapkey_count` |
 | 二进制传感器 | 在线 / 休眠 / 防拆 / 童锁 / 触屏开门 | `binary_sensor.<name>_online` 等 |
 | 二进制传感器 | 通道 0 / 1 在线状态 | `binary_sensor.<name>_channel_online` 等 |
-| 按钮 | 远程开门 / 唤醒设备 | `button.<name>_open_door` 等 |
+| 按钮 | 远程开门 / **获取门外截图** | `button.<name>_open_door` / `button.<name>_snapshot_door` |
 | 按钮 | 生成临时密码 / 刷新临时密码列表 | `button.<name>_generate_snapkey` 等 |
 | 开关 | 童锁 / 呼叫转接 / 触屏开门 | `switch.<name>_child_lock` 等 |
 | 数字/选择/文本/时间 | 临时密码配置（次数/天数/星期/名称/时间段） | `number.<name>_snapkey_*` 等（配置类） |
@@ -105,14 +106,15 @@
 | 服务 | 描述 |
 |------|------|
 | `lechange_door_lock.open_door_remote` | 远程开门（remoteOpenDoor） |
-| `lechange_door_lock.wake_up_device` | 唤醒休眠设备 |
+| `lechange_door_lock.wake_up_device` | 唤醒休眠设备(已由「获取门外截图」按钮替代,仅保留兼容) |
 | `lechange_door_lock.call_answer` | 应答门铃呼叫 |
 | `lechange_door_lock.call_refuse` | 拒绝门铃呼叫 |
 | `lechange_door_lock.call_hangup` | 挂断门铃呼叫 |
 | `lechange_door_lock.get_voice_reply` | 获取语音回复列表 |
 | `lechange_door_lock.set_voice_reply` | 设置语音回复 |
-| `lechange_door_lock.create_snapkey` | 生成临时密码 |
-| `lechange_door_lock.get_snapkey_list` | 临时密码列表 |
+| `lechange_door_lock.create_snapkey` | 生成临时密码（客户端生成,不触发验证码） |
+| `lechange_door_lock.get_snapkey_list` | 临时密码分组列表（云,设备休眠可用） |
+| `lechange_door_lock.delete_snapkey` | 删除临时密码（需 keyId,extra 可传全字段） |
 | `lechange_door_lock.get_open_door_record` | 开门记录 |
 | `lechange_door_lock.set_properties` | 通用属性写入 |
 | `lechange_door_lock.call_service` | 通用服务调用（高级/调试） |
@@ -120,7 +122,8 @@
 #### 事件（自动化用）
 服务与轮询通过 `lechange_door_lock_event` 事件返回结果，`type` 取值：
 - `open_door` / `wake_up` / `call_answer` / `call_refuse` / `call_hangup`
-- `voice_reply_list` / `voice_reply_set` / `snapkey_created` / `snapkey_list`
+- `snapshot`（门外截图已保存，含 `url`/`bytes` 字段）
+- `voice_reply_list` / `voice_reply_set` / `snapkey_created` / `snapkey_list` / `snapkey_deleted`
 - `open_door_records` / `set_properties` / `service_result`
 - `open_record`（新开门记录，含 `record` 字段，如用户/方式）
 - `alarm`（新云侧告警，含 `alarm` 字段：labelType/refId/time/message，设备休眠可用）
@@ -170,11 +173,11 @@ CI(`.github/workflows/hacs.yml`)同时运行 [HACS Action](https://github.com/ha
 - **开锁为高危操作**：服务/按钮会直接远程开锁，请谨慎配置自动化，并注意是否已开启 App 内的远程开门确认。
 - **节流**：`cloud_polling` 默认 30 秒轮询；若账号同时被多个集成使用，请调大 `update_interval`。
 - **人机验证**：若连续输错密码或触发了风控，登录会失败（需在 App 中完成验证后再试）。
+- **终端管理账号**：集成为独立 PC 型终端(android/HA-Integration-Box + 固定 terminalId,不与手机 App 同终端,不会顶号);若账号开启终端管理,请直接在 App 「终端管理」完成授权(集成侧可发送授权验证码:服务 `lechange_door_lock.send_sms_code`,usage=GrantingCredit;实测授权提交需 App 授权页上下文)。
 
 ### 📜 更新日志
 统一更新日志见 [CHANGELOG.md](CHANGELOG.md)(发布时 CI 会自动提取并作为 Release 说明)。
-- **v1.5.0 (2026-09-03, 当前)**: 支持**短信验证码登录**(账号密码/短信二选一,App 源码取证 GetTokenBySMS);密码登录失败定向提示(需短信验证码/人机验证)。
-- **v1.4.0 (2026-09-03)**: 临时密码改用抓包验证的云消息 API(设备休眠也可生成/列表);云侧告警轮询与 `alarm` 事件、最新告警传感器;单设备详情 API;通道在线 unique_id 等修复。(抓包证据存本地 API/capture,公开仓库不含)
+- **v1.4.0 (2026-09-03)**: 临时密码改用抓包验证的云消息 API(设备休眠也可生成/列表);云侧告警轮询与 `alarm` 事件、最新告警传感器;单设备详情 API;通道在线 unique_id 等修复。支持**短信验证码登录**(账号密码/短信二选一,App 源码取证 GetTokenBySMS);密码登录失败定向提示(需短信验证码/人机验证)。)
 - **v1.3.0 (2026-09-03)**: 临时密码实体化配置(number/select/text/time)+ 生成/刷新按钮 + 数量传感器;最近开门时间/方式传感器;通道在线状态。(功能移植自社区分支持续改进)
 - **v1.2.0 (2026-09-03)**: 客户端私有云协议迁移;门锁/开关/摄像头(默认云端流媒体网关)/对话实体与服务;单测 + HACS/发布 CI;MIT LICENSE 与免责声明;修复登录会话死锁。(v1.1.0 为开发中间版本,已并入)
 - **v1.0.1 (2026-03-11)**: 添加开门记录(旧接口版本)。

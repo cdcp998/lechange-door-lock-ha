@@ -60,6 +60,15 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         self.channel_id: str = "0"
 
         client_session = async_get_clientsession(hass)
+        # 独立终端标识:安装时生成一次并持久化(不与手机 App 同终端 → 不互相顶号)
+        terminal_id = str((entry.options or {}).get("terminal_id", ""))
+        if not terminal_id:
+            import uuid as _uuid
+
+            terminal_id = "lechange-hass-" + _uuid.uuid4().hex[:16]
+            hass.config_entries.async_update_entry(
+                entry, options={**(entry.options or {}), "terminal_id": terminal_id}
+            )
         self.api = ImouClient(
             client_session,
             username=entry.data.get(CONF_USERNAME, ""),
@@ -69,6 +78,7 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             internal_username=entry.data.get(CONF_INTERNAL_USERNAME, ""),
             api_host=entry.data.get(CONF_API_HOST, ""),
             on_session_update=self._persist_session,
+            terminal_id=terminal_id,
         )
 
         self._seen_lock_notes: set[str] = set()
@@ -310,16 +320,16 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         self.snapkey_list = list(keys) if isinstance(keys, list) else []
 
     async def async_create_snapkey_cloud(self, config: Optional[dict] = None) -> dict:
-        """按抓包验证的云消息 API 生成临时密码 (设备休眠也可用).
+        """按抓包/测试报告(R14)方案生成临时密码:客户端自产 keyId/tempKey,
+        经消息域 `iot.message.SmartLockSecretAdd` 直接登记(不加 SetService,
+        不触发身份验证码;设备休眠也可用,实测 10000)。
 
-        tempKey/keyId 由客户端生成(与 App 一致);成功后返回
-        {"name", "key": tempKey, "usagePeriod": ...} 供结果展示。
+        成功后返回 {"name", "key": tempKey, ...} 供结果展示。
         """
         import random as _random
 
         config = config or self.snapkey_config
         temp_key = f"{_random.randint(0, 99999999):08d}"
-        key_id = _random.randint(10000000, 999999999)
         usage_period = build_usage_period(
             str(config.get("weekday_mode", "Every day")),
             int(config.get("effective_day", 1)),
@@ -332,12 +342,10 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             number=int(config.get("effective_num", -1)),
             effect_days=int(config.get("effective_day", 1)),
             usage_period=usage_period,
-            key_id=key_id,
         )
         return {
             "name": config.get("name", ""),
             "key": temp_key,
-            "key_id": key_id,
             "usage_period": usage_period,
             "raw": result,
         }
