@@ -28,12 +28,13 @@
 ### ✨ 功能特性
 - **门锁实体**：`lock.*` 显示 已锁/未锁，支持远程开锁（remoteOpenDoor）。
 - **状态监控**：门锁电池/摄像机电池电量、门状态（关/开）、电量模式、WiFi 信号、最近开门记录。
-- **安全传感器**：在线状态、休眠状态、防拆报警、童锁、触屏开门。
+- **开门信息**：最近开门时间（格式化）与最近开门方式（密码/卡片/指纹/远程…），来自 `lockNoteReport`。
+- **安全传感器**：在线状态、通道在线状态、休眠状态、防拆报警、童锁、触屏开门。
 - **控制开关**：童锁、呼叫转接、触屏开门（`iot.control.SetProperties`）。
 - **远程控制**：远程开门、唤醒设备按钮。
-- **📹 视频**：每个摄像头通道生成 camera 实体，支持局域网 RTSP / go2rtc 中转（在集成选项里配置地址）。
+- **📹 视频**：每个摄像头通道生成 camera 实体，默认使用云端流媒体网关地址，支持局域网 RTSP / go2rtc 中转（在集成选项里配置地址）。
 - **🗣️ 对话**：应答/拒绝/挂断门铃呼叫（CallAnswer/CallRefuse/CallHangup）、获取/设置语音回复（GetVoiceReply/SetVoiceReply）。
-- **临时密码**：生成/查询临时密码（CreateDeviceSnapkey/GetDeviceSnapkeys），结果通过事件返回。
+- **🔑 临时密码**：**实体化配置**（名称/使用次数/有效天数/生效星期/时间段，number·select·text·time 四类实体）+「生成临时密码」「刷新列表」按钮 + 数量传感器；兼容 `create_snapkey`/`get_snapkey_list` 服务。
 - **开门记录**：轮询 `lockNoteReport` 属性，新记录会触发事件。
 - **会话自动续期**：会话失效时自动使用存储的账号密码重新登录。
 - **国际化**：内置中文、英文界面翻译。
@@ -75,10 +76,25 @@
 | 门锁 | 已锁/未锁 + 远程开锁 | `lock.<name>_lock` |
 | 传感器 | 门锁电池电量 / 摄像头电池电量 | `sensor.<name>_battery_lock` 等 |
 | 传感器 | 门状态 / 电量模式 / WiFi 信号 / 最近开门记录 | `sensor.<name>_door_state` 等 |
+| 传感器 | 最近开门时间 / 最近开门方式 | `sensor.<name>_latest_open_door_time` 等 |
+| 传感器 | 临时密码数量（属性含列表与最近生成） | `sensor.<name>_snapkey_count` |
 | 二进制传感器 | 在线 / 休眠 / 防拆 / 童锁 / 触屏开门 | `binary_sensor.<name>_online` 等 |
+| 二进制传感器 | 通道 0 / 1 在线状态 | `binary_sensor.<name>_channel_online` 等 |
 | 按钮 | 远程开门 / 唤醒设备 | `button.<name>_open_door` 等 |
+| 按钮 | 生成临时密码 / 刷新临时密码列表 | `button.<name>_generate_snapkey` 等 |
 | 开关 | 童锁 / 呼叫转接 / 触屏开门 | `switch.<name>_child_lock` 等 |
+| 数字/选择/文本/时间 | 临时密码配置（次数/天数/星期/名称/时间段） | `number.<name>_snapkey_*` 等（配置类） |
 | 摄像头 | 通道 0 / 1 摄像头（视频） | `camera.<name>_camera_0` 等 |
+
+#### 临时密码使用（实体化配置）
+1. 在 **数字**（使用次数/有效天数）、**选择**（生效星期：每天/工作日/周末/单日）、
+   **文本**（名称）、**时间**（开始/结束）中设置参数（持久化到集成选项）。
+2. 点击 **`button.generate_snapkey`** 生成；最近生成的密码在按钮属性
+   `last_generated_password` / `last_generated_name` 与 `sensor.snapkey_count` 属性中查看，
+   同时触发 `lechange_door_lock_event`（`type: snapkey_created`）。
+3. 点击 **`button.refresh_snapkey_list`** 拉取当前列表；`sensor.snapkey_count` 显示数量。
+4. 也可直接调用 `create_snapkey` / `get_snapkey_list` 服务（参数化调用）。
+5. 设备休眠时（status=sleep）生成会返回 `10003`，需先唤醒后重试。
 
 #### 支持的服务
 | 服务 | 描述 |
@@ -138,7 +154,8 @@ pytest tests/ -q
 ```
 覆盖:x-pcs 签名头(黄金用例)、登录后密钥派生、会话失效自动重登、HTTP/网络/TLS
 错误映射、型号定义 ref→identifier 递归解码(struct/array/枚举/布尔)、锁状态推导、
-双电池拆分、RTSP 地址拼装、云端/局域网主机判定等。
+双电池拆分、星期→period 映射与临时密码时间段构建、开门时间格式化/方式映射、
+RTSP 地址拼装、云端/局域网主机判定等(共 57 例)。
 CI(`.github/workflows/hacs.yml`)同时运行 [HACS Action](https://github.com/hacs/action)
 仓库校验与上述测试。
 
