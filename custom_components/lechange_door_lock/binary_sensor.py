@@ -26,6 +26,11 @@ async def async_setup_entry(hass, entry, async_add_entities):
         LeChangeChildLockSensor(coordinator, device_id),
         LeChangeOpenDoorByTouchSensor(coordinator, device_id),
     ]
+    # 通道在线状态(主/辅摄像头通道)
+    for ch in (coordinator.data or {}).get("channels", []):
+        entities.append(
+            LeChangeChannelOnlineSensor(coordinator, device_id, str(ch.get("channelId", "0")))
+        )
     async_add_entities(entities, True)
 
 
@@ -111,3 +116,21 @@ class LeChangeOpenDoorByTouchSensor(_BaseLeChangeBinarySensor):
     @property
     def is_on(self) -> bool:
         return bool((self.coordinator.data or {}).get("props", {}).get("openDoorByTouch"))
+
+
+class LeChangeChannelOnlineSensor(_BaseLeChangeBinarySensor):
+    """通道在线状态 (channelList[].status)."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+
+    def __init__(self, coordinator, device_id: str, channel_id: str) -> None:
+        super().__init__(coordinator, device_id, "channel_online")
+        self._channel_id = channel_id
+        self._attr_translation_placeholders = {"channel_id": channel_id}
+
+    @property
+    def is_on(self) -> bool:
+        for ch in (self.coordinator.data or {}).get("channels", []):
+            if str(ch.get("channelId")) == str(self._channel_id):
+                return ch.get("status") == "online"
+        return False

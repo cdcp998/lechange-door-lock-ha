@@ -1,10 +1,14 @@
 """Tests for pure state-derivation helpers."""
 
 from lechange_door_lock.state_utils import (
+    build_snapkey_periods,
     derive_door_state,
     derive_lock_state,
     extract_batteries,
+    format_open_door_time,
     normalize_wifi,
+    open_method_label,
+    weekday_mode_to_periods,
 )
 
 
@@ -88,3 +92,42 @@ class TestNormalizeWifi:
         wifi = normalize_wifi({"wifiDoorLock": {"SSID": "X", "status": "2", "intensity": "4"}})
         assert wifi["status"] == 2
         assert wifi["intensity"] == 4
+
+
+class TestSnapkeyWeekdays:
+    def test_modes(self):
+        assert weekday_mode_to_periods("Every day") == [0, 1, 2, 3, 4, 5, 6]
+        assert weekday_mode_to_periods("Weekdays") == [1, 2, 3, 4, 5]
+        assert weekday_mode_to_periods("Weekend") == [0, 6]
+        assert weekday_mode_to_periods("Monday") == [1]
+        assert weekday_mode_to_periods("Sunday") == [0]
+        assert weekday_mode_to_periods("Saturday") == [6]
+
+    def test_unknown_mode_defaults_to_every_day(self):
+        assert weekday_mode_to_periods("Nope") == [0, 1, 2, 3, 4, 5, 6]
+
+    def test_build_periods(self):
+        periods = build_snapkey_periods("08:00:00", "20:00:00", "Weekdays")
+        assert periods == [
+            {"period": 1, "beginTime": "08:00:00", "endTime": "20:00:00"},
+            {"period": 2, "beginTime": "08:00:00", "endTime": "20:00:00"},
+            {"period": 3, "beginTime": "08:00:00", "endTime": "20:00:00"},
+            {"period": 4, "beginTime": "08:00:00", "endTime": "20:00:00"},
+            {"period": 5, "beginTime": "08:00:00", "endTime": "20:00:00"},
+        ]
+
+
+class TestOpenRecordDisplay:
+    def test_format_time_local_format(self):
+        assert format_open_door_time("20260625T003156") == "2026-06-25 00:31:56"
+
+    def test_format_time_already_formatted(self):
+        assert format_open_door_time("2026-06-25 00:31:56") == "2026-06-25 00:31:56"
+
+    def test_format_time_unknown_passthrough(self):
+        assert format_open_door_time("garbage") == "garbage"
+
+    def test_method_label(self):
+        assert open_method_label(2) == "指纹"
+        assert open_method_label("15") == "远程用户"
+        assert open_method_label(99) == "99"

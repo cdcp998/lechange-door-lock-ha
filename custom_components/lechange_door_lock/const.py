@@ -30,6 +30,8 @@ CONF_FIRMWARE_VERSION = "firmware_version"
 CONF_CHANNEL_JSON = "channels"        # JSON: channelList 快照
 CONF_LOCK_STATE = "lock_state"        # 设备列表中的 lockState (beClosed/...)
 CONF_STREAM_ENTRY = "stream_entry"    # 云端流媒体网关 (streamEntryAddrV3 / mediaConfig.streamUrl)
+CONF_SNAPKEY_CONFIG = "snapkey_config"        # 临时密码配置(实体),存 entry.options
+CONF_LAST_SNAPKEY_RESULT = "last_snapkey_result"  # 最近一次生成的临时密码(脱敏后)
 
 # --- camera / video options ----------------------------------------------
 CONF_RTSP_HOST = "rtsp_host"          # 门锁局域网 IP(开启视频 RTSP 用)
@@ -54,7 +56,8 @@ CA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs", "dah
 DEFAULT_SCAN_INTERVAL = 30  # seconds
 
 # Platforms
-PLATFORMS = ["sensor", "binary_sensor", "lock", "button", "switch", "camera"]
+PLATFORMS = ["sensor", "binary_sensor", "lock", "button", "switch", "camera",
+             "number", "select", "text", "time"]
 
 # --- services -------------------------------------------------------------
 SERVICE_GENERATE_SNAPKEY = "create_snapkey"
@@ -116,4 +119,21 @@ KEY_TYPE_NAMES = {
     "13": "动态密码", "14": "机械钥匙", "15": "远程用户", "16": "门内开门",
     "17": "室内机开门", "18": "室外机开门", "19": "二维码", "20": "手机",
     "21": "管理员密码", "22": "管理员指纹", "23": "管理员密码+指纹",
+}
+
+# 星期(select 选项) ↔ 设备模型 period 枚举(0=周日 .. 6=周六)
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+WEEKDAY_TO_PERIOD = {
+    "Sunday": 0, "Monday": 1, "Tuesday": 2, "Wednesday": 3,
+    "Thursday": 4, "Friday": 5, "Saturday": 6,
+}
+SNAPKEY_WEEKDAY_OPTIONS = ("Every day", "Weekdays", "Weekend") + WEEKDAYS
+
+DEFAULT_SNAPKEY_CONFIG = {
+    "name": "Home Assistant",
+    "effective_num": -1,   # 使用次数(-1 不限)
+    "effective_day": 1,    # 有效天数
+    "begin_time": "00:00:00",
+    "end_time": "23:59:59",
+    "weekday_mode": "Every day",
 }

@@ -11,8 +11,8 @@ from homeassistant.components.sensor import (
 from homeassistant.const import PERCENTAGE
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, KEY_TYPE_NAMES, PROP_LOCK_STATE
-from .state_utils import derive_door_state
+from .const import DOMAIN, PROP_LOCK_STATE
+from .state_utils import derive_door_state, format_open_door_time, open_method_label
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +32,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
         LeChangePowerModeSensor(coordinator, device_id),
         LeChangeWifiSignalSensor(coordinator, device_id),
         LeChangeLastOpenSensor(coordinator, device_id),
+        LeChangeLatestOpenDoorTimeSensor(coordinator, device_id),
+        LeChangeLatestOpenDoorMethodSensor(coordinator, device_id),
+        LeChangeSnapkeyCountSensor(coordinator, device_id),
     ]
     async_add_entities(entities, True)
 
@@ -133,19 +136,20 @@ class LeChangeLastOpenSensor(_BaseLeChangeSensor):
 
     @property
     def native_value(self) -> str | None:
+        record = self._latest_record()
+        if not record:
+            return None
+        name = record.get("name") or ""
+        method = open_method_label(record.get("keyType"))
+        parts = [p for p in (name, method) if p]
+        return " · ".join(parts) if parts else None
+
+    def _latest_record(self) -> dict | None:
         data = self.coordinator.data
         if not data:
             return None
-        notes = data.get("lock_notes") or []
-        if not notes:
-            return None
-        last = notes[-1]
-        if not isinstance(last, dict):
-            return None
-        name = last.get("name") or ""
-        method = KEY_TYPE_NAMES.get(str(last.get("keyType")), "")
-        parts = [p for p in (name, method) if p]
-        return " · ".join(parts) if parts else None
+        record = data.get("latest_open_door_record")
+        return record if isinstance(record, dict) and record else None
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -156,4 +160,69 @@ class LeChangeLastOpenSensor(_BaseLeChangeSensor):
         return {
             "open_record_count": len(notes),
             "records": notes[-10:],
+        }
+
+
+class LeChangeLatestOpenDoorTimeSensor(_BaseLeChangeSensor):
+    """最近一次开门时间(格式化 lockNoteReport.localTime)."""
+
+    _attr_icon = "mdi:clock-outline"
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "latest_open_door_time")
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data
+        if not data:
+            return None
+        record = data.get("latest_open_door_record")
+        if not isinstance(record, dict):
+            return None
+        for key in ("localTime", "time", "openTime", "occurTime", "recordTime"):
+            value = record.get(key)
+            if value:
+                return format_open_door_time(value)
+        return None
+
+
+class LeChangeLatestOpenDoorMethodSensor(_BaseLeChangeSensor):
+    """最近一次开门方式(密码/卡片/指纹/远程...)."""
+
+    _attr_icon = "mdi:key-variant"
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "latest_open_door_method")
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data
+        if not data:
+            return None
+        record = data.get("latest_open_door_record")
+        if not isinstance(record, dict):
+            return None
+        key_type = record.get("keyType")
+        if key_type is None:
+            return None
+        return open_method_label(key_type)
+
+
+class LeChangeSnapkeyCountSensor(_BaseLeChangeSensor):
+    """当前账户下已生成的临时密码数量(按钮刷新后更新)."""
+
+    _attr_icon = "mdi:key-chain-variant"
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "snapkey_count")
+
+    @property
+    def native_value(self) -> int | None:
+        return len(self.coordinator.snapkey_list)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {
+            "snapkeys": self.coordinator.snapkey_list[-20:],
+            "last_generated": self.coordinator.last_snapkey_result,
         }

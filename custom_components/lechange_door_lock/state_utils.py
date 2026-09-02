@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Optional
+
+from .const import KEY_TYPE_NAMES, WEEKDAYS, WEEKDAY_TO_PERIOD
 
 LOCK_STATE_CLOSED = "beClosed"
 LOCK_STATE_OPENED_KEYS = {"beOpened", "beAjar"}
@@ -82,3 +85,44 @@ def _int_or_none(value: Any) -> Optional[int]:
         except ValueError:
             return None
     return None
+
+
+# ------------------------------------------------------------- 临时密码配置
+def weekday_mode_to_periods(mode: str) -> list[int]:
+    """select 的 weekday_mode → 设备模型 period 枚举列表(0=周日..6=周六)."""
+    if mode == "Every day":
+        return [0, 1, 2, 3, 4, 5, 6]
+    if mode == "Weekdays":
+        return [1, 2, 3, 4, 5]
+    if mode == "Weekend":
+        return [0, 6]
+    if mode in WEEKDAY_TO_PERIOD:
+        return [WEEKDAY_TO_PERIOD[mode]]
+    return [0, 1, 2, 3, 4, 5, 6]
+
+
+def build_snapkey_periods(
+    begin_time: str, end_time: str, weekday_mode: str
+) -> list[dict]:
+    """构建 CreateDeviceSnapkey 的 effectPeriod(每条一个周期日)."""
+    return [
+        {"period": p, "beginTime": begin_time, "endTime": end_time}
+        for p in weekday_mode_to_periods(weekday_mode)
+    ]
+
+
+# ------------------------------------------------------------- 开门记录展示
+def format_open_door_time(value: Any) -> str:
+    """格式化 lockNoteReport 时间字段(如 20260625T003156)."""
+    text = str(value)
+    for fmt in ("%Y%m%dT%H%M%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+    return text
+
+
+def open_method_label(key_type: Any) -> str:
+    """keyType(枚举 0-23)→ 中文方式;未知时原样返回."""
+    return KEY_TYPE_NAMES.get(str(key_type), str(key_type))

@@ -86,6 +86,15 @@
       },
       "last_open": {
         "name": "Last open record"
+      },
+      "latest_open_door_time": {
+        "name": "Latest open time"
+      },
+      "latest_open_door_method": {
+        "name": "Latest open method"
+      },
+      "snapkey_count": {
+        "name": "Snapkey count"
       }
     },
     "binary_sensor": {
@@ -103,6 +112,9 @@
       },
       "open_door_by_touch": {
         "name": "Touch to open"
+      },
+      "channel_online": {
+        "name": "Channel {channel_id} online"
       }
     },
     "button": {
@@ -111,6 +123,38 @@
       },
       "wake_up": {
         "name": "Wake up"
+      },
+      "generate_snapkey": {
+        "name": "Generate temporary password"
+      },
+      "refresh_snapkey_list": {
+        "name": "Refresh snapkey list"
+      }
+    },
+    "number": {
+      "snapkey_effective_num": {
+        "name": "Snapkey use limit"
+      },
+      "snapkey_effective_day": {
+        "name": "Snapkey valid days"
+      }
+    },
+    "select": {
+      "snapkey_weekday_mode": {
+        "name": "Snapkey weekdays"
+      }
+    },
+    "text": {
+      "snapkey_name": {
+        "name": "Snapkey name"
+      }
+    },
+    "time": {
+      "snapkey_begin_time_picker": {
+        "name": "Snapkey start time"
+      },
+      "snapkey_end_time_picker": {
+        "name": "Snapkey end time"
       }
     },
     "switch": {

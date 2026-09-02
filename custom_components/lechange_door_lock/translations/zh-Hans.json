@@ -86,6 +86,15 @@
       },
       "last_open": {
         "name": "最近开门记录"
+      },
+      "latest_open_door_time": {
+        "name": "最近开门时间"
+      },
+      "latest_open_door_method": {
+        "name": "最近开门方式"
+      },
+      "snapkey_count": {
+        "name": "临时密码数量"
       }
     },
     "binary_sensor": {
@@ -103,6 +112,9 @@
       },
       "open_door_by_touch": {
         "name": "触屏开门"
+      },
+      "channel_online": {
+        "name": "通道 {channel_id} 在线状态"
       }
     },
     "button": {
@@ -111,6 +123,38 @@
       },
       "wake_up": {
         "name": "唤醒设备"
+      },
+      "generate_snapkey": {
+        "name": "生成临时密码"
+      },
+      "refresh_snapkey_list": {
+        "name": "刷新临时密码列表"
+      }
+    },
+    "number": {
+      "snapkey_effective_num": {
+        "name": "临时密码使用次数"
+      },
+      "snapkey_effective_day": {
+        "name": "临时密码有效天数"
+      }
+    },
+    "select": {
+      "snapkey_weekday_mode": {
+        "name": "临时密码生效星期"
+      }
+    },
+    "text": {
+      "snapkey_name": {
+        "name": "临时密码名称"
+      }
+    },
+    "time": {
+      "snapkey_begin_time_picker": {
+        "name": "临时密码开始时间"
+      },
+      "snapkey_end_time_picker": {
+        "name": "临时密码结束时间"
       }
     },
     "switch": {

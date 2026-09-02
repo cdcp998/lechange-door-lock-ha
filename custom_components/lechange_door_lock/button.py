@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from homeassistant.components.button import ButtonEntity
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, EVENT_PREFIX
@@ -20,6 +21,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     entities = [
         LeChangeOpenDoorButton(coordinator, device_id),
         LeChangeWakeUpButton(coordinator, device_id),
+        LeChangeGenerateSnapkeyButton(coordinator, device_id),
+        LeChangeRefreshSnapkeyListButton(coordinator, device_id),
     ]
     async_add_entities(entities, True)
 
@@ -83,3 +86,70 @@ class LeChangeWakeUpButton(_BaseLeChangeButton):
                 await asyncio.sleep(10)
                 await coordinator.async_request_refresh()
             self.hass.async_create_task(delayed_refresh())
+        else:
+            raise HomeAssistantError(f"Wake up device failed: {errors}")
+
+
+class LeChangeGenerateSnapkeyButton(_BaseLeChangeButton):
+    """按实体化配置(名称/次数/天数/星期/时间段)生成临时密码."""
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "generate_snapkey")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        result = self.coordinator.last_snapkey_result or {}
+        attrs = {}
+        if result.get("name"):
+            attrs["last_generated_name"] = result["name"]
+        if result.get("key"):
+            attrs["last_generated_password"] = result["key"]
+        return attrs
+
+    async def async_press(self) -> None:
+        coordinator = self.coordinator
+        config = coordinator.snapkey_config
+        result = await coordinator.api.async_set_service(
+            coordinator.device_id,
+            coordinator.product_id,
+            "CreateDeviceSnapkey",
+            {
+                "name": config["name"],
+                "effectTimes": config["effective_day"],
+                "number": config["effective_num"],
+                "effectPeriod": coordinator.get_snapkey_periods(config),
+            },
+        )
+        if not result:
+            raise HomeAssistantError("Generate temporary password failed")
+        coordinator.set_snapkey_result(result)
+        coordinator.hass.bus.async_fire(
+            EVENT_PREFIX,
+            {"type": "snapkey_created", "device_id": self._device_id, "result": result},
+        )
+        _LOGGER.info("Temporary password generated for %s", self._device_id)
+
+
+class LeChangeRefreshSnapkeyListButton(_BaseLeChangeButton):
+    """按需拉取当前临时密码列表."""
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "refresh_snapkey_list")
+
+    async def async_press(self) -> None:
+        coordinator = self.coordinator
+        result = await coordinator.api.async_set_service(
+            coordinator.device_id,
+            coordinator.product_id,
+            "GetDeviceSnapkeys",
+            {"offset": 0, "count": 100},
+        )
+        keys = result.get("keys") if isinstance(result, dict) else None
+        if keys is None:
+            raise HomeAssistantError("Get temporary password list failed")
+        coordinator.set_snapkey_list(keys)
+        coordinator.hass.bus.async_fire(
+            EVENT_PREFIX,
+            {"type": "snapkey_list", "device_id": self._device_id, "result": result},
+        )
+        _LOGGER.info("Temporary password list refreshed for %s", self._device_id)

@@ -20,11 +20,14 @@ from .const import (
     CONF_DEVICE_NAME,
     CONF_API_HOST,
     CONF_INTERNAL_USERNAME,
+    CONF_LAST_SNAPKEY_RESULT,
     CONF_PASSWORD,
     CONF_PRODUCT_ID,
     CONF_SESSION_ID,
+    CONF_SNAPKEY_CONFIG,
     CONF_TOKEN,
     CONF_USERNAME,
+    DEFAULT_SNAPKEY_CONFIG,
     DOMAIN,
     DEFAULT_SCAN_INTERVAL,
     EVENT_PREFIX,
@@ -34,7 +37,7 @@ from .const import (
     PROP_CHANNEL_NAMES,
 )
 from .imou_client import ImouAPIError, ImouClient
-from .state_utils import derive_lock_state, extract_batteries, normalize_wifi
+from .state_utils import build_snapkey_periods, derive_lock_state, extract_batteries, normalize_wifi
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,6 +67,13 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
 
         self._seen_lock_notes: set[str] = set()
         self._device_info_update_unsub = None
+
+        # 临时密码(实体化配置):从 entry.options 恢复
+        self.snapkey_list: list[dict] = []
+        saved_result = entry.options.get(CONF_LAST_SNAPKEY_RESULT)
+        self.last_snapkey_result: Optional[dict] = (
+            dict(saved_result) if isinstance(saved_result, dict) else None
+        )
 
         super().__init__(
             hass,
@@ -155,9 +165,13 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         notes = props.get(PROP_LOCK_NOTE_REPORT) or []
         if isinstance(notes, list):
             data["lock_notes"] = notes
+            data["latest_open_door_record"] = (
+                dict(notes[-1]) if notes and isinstance(notes[-1], dict) else {}
+            )
             self._fire_new_lock_notes(notes)
         else:
             data["lock_notes"] = []
+            data["latest_open_door_record"] = {}
 
         ch_names = props.get(PROP_CHANNEL_NAMES) or []
         if isinstance(ch_names, list):
@@ -198,6 +212,57 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             self.hass.bus.async_fire(
                 EVENT_PREFIX, {"type": "open_record", "record": record}
             )
+
+    # -------------------------------------------------------- 临时密码配置
+    @property
+    def snapkey_config(self) -> dict:
+        """Current temporary-password config (defaults + persisted options)."""
+        config = dict(DEFAULT_SNAPKEY_CONFIG)
+        saved = self.entry.options.get(CONF_SNAPKEY_CONFIG)
+        if isinstance(saved, dict):
+            for key, value in saved.items():
+                if key in config:
+                    config[key] = value
+        return config
+
+    def update_snapkey_config(self, **updates) -> None:
+        """Persist temporary-password settings into entry options."""
+        config = self.snapkey_config
+        config.update(updates)
+        self.hass.config_entries.async_update_entry(
+            self.entry,
+            options={**self.entry.options, CONF_SNAPKEY_CONFIG: config},
+        )
+
+    def get_snapkey_periods(self, config: Optional[dict] = None) -> list[dict]:
+        """Build CreateDeviceSnapkey effectPeriod from the persisted settings."""
+        config = config or self.snapkey_config
+        return build_snapkey_periods(
+            str(config.get("begin_time", "00:00:00")),
+            str(config.get("end_time", "23:59:59")),
+            str(config.get("weekday_mode", "Every day")),
+        )
+
+    def set_snapkey_result(self, result: dict) -> None:
+        """Remember the last generated password (minimal fields) in options."""
+        if not isinstance(result, dict):
+            self.last_snapkey_result = None
+            return
+        self.last_snapkey_result = {
+            "name": result.get("name"),
+            "key": result.get("key"),
+        }
+        self.hass.config_entries.async_update_entry(
+            self.entry,
+            options={
+                **self.entry.options,
+                CONF_LAST_SNAPKEY_RESULT: self.last_snapkey_result,
+            },
+        )
+
+    def set_snapkey_list(self, keys: list) -> None:
+        """Remember the last fetched temporary-password list."""
+        self.snapkey_list = list(keys) if isinstance(keys, list) else []
 
     @property
     def is_locked(self) -> Optional[bool]:
