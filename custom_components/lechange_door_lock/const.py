@@ -72,6 +72,9 @@ SERVICE_GET_VOICE_REPLY = "get_voice_reply"
 SERVICE_SET_VOICE_REPLY = "set_voice_reply"
 SERVICE_SET_PROPERTIES = "set_properties"
 SERVICE_CALL_SERVICE = "call_service"
+SERVICE_DELETE_SNAPKEY = "delete_snapkey"
+SERVICE_SEND_SMS_CODE = "send_sms_code"
+SERVICE_AUTHORIZE_TERMINAL = "authorize_terminal"
 
 # --- events ---------------------------------------------------------------
 EVENT_PREFIX = f"{DOMAIN}_event"

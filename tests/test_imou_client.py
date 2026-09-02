@@ -36,7 +36,7 @@ def _freeze_clock(monkeypatch):
 
     monkeypatch.setattr(ic, "datetime", FakeDT)
     monkeypatch.setattr(ic.random, "choices", lambda seq, k=64: list("a") * k)
-    monkeypatch.setattr(ic, "_build_client_ua", lambda: "FIXED_UA")
+    monkeypatch.setattr(ic, "_build_client_ua", lambda *a, **k: "FIXED_UA")
 
 
 def _expected_signature(path, body, username, key, session_id, digest_line):
@@ -114,11 +114,13 @@ class FakeSession:
 
     def __init__(self, handlers: dict):
         self.handlers = handlers  # api_name -> callable() -> FakeResponse
-        self.calls: list[str] = []
+        self.calls: list[str] = []       # api names
+        self.calls_full: list[tuple[str, dict]] = []  # (api, kwargs)
 
     async def post(self, url, **kwargs):
         api = url.split("/pcs/v1/", 1)[1]
         self.calls.append(api)
+        self.calls_full.append((api, kwargs))
         handler = self.handlers.get(api)
         if handler is None:
             raise AssertionError(f"unexpected API call: {api}")
@@ -222,6 +224,117 @@ class TestHttpPostAndErrors:
         with pytest.raises(ImouAPIError) as err:
             await client.async_ensure_session()
         assert err.value.code == 11010
+
+
+class TestGrantingCredit:
+    async def test_granting_credit_full_chain(self, monkeypatch):
+        """终端授权完整链(分析文件 §一):CheckValidCode→accessToken→GrantingCredit.
+
+        加密函数打桩(不依赖 pycryptodome,CI 亦可确定);真实加密见 roundtrip 测试。
+        """
+        monkeypatch.setattr(ic, "_enc_account", lambda a: "ENC(" + a + ")")
+        calls = []
+
+        def check_valid():
+            calls.append("check")
+            return _resp({"code": 10000, "data": {"accessToken": "AT-123"}})
+
+        def granting():
+            calls.append("grant")
+            return _resp({"code": 10000, "data": {}})
+
+        session = FakeSession({
+            "common.validcode.CheckValidCode": check_valid,
+            "user.account.GrantingCredit": granting,
+        })
+        client = ImouClient(session, session_id="s", token="t", internal_username="u",
+                            api_host="https://gw.example.com")
+        await client.async_granting_credit("13800000000", "123456")
+        assert calls == ["check", "grant"]
+        check_kwargs = session.calls_full[0][1]
+        assert json.loads(check_kwargs["data"])["data"]["validCode"] == "123456"
+        assert json.loads(check_kwargs["data"])["data"]["usage"] == "GrantingCredit"
+        grant_kwargs = session.calls_full[1][1]
+        body = json.loads(grant_kwargs["data"])["data"]
+        # validCode 必须是 accessToken(非短信码)
+        assert body["validCode"] == "AT-123"
+        assert body["type"] == "grantingCredit"
+        assert body["isEncrypt"] is True
+        assert body["account"] == "ENC(13800000000)"
+
+    def test_enc_account_roundtrip(self):
+        """真实 AES-GCM 加密可解回(App n40/h.s 同款;无 pycryptodome 则跳过)."""
+        pytest.importorskip("Crypto")
+        from Crypto.Cipher import AES
+        import base64 as _b64
+        import hashlib as _hl
+
+        enc = ic._enc_account("13800000000")
+        assert enc and enc != "13800000000"
+        key = _hl.sha256(b"F9TtRyv7X89nM0vp2EKOjdKLFnjlrN9rENCRYPTKEY").digest()
+        raw = _b64.b64decode(enc)
+        c = AES.new(key, AES.MODE_GCM, nonce=raw[:12])
+        assert c.decrypt_and_verify(raw[12:-16], raw[-16:]).decode() == "13800000000"
+
+    async def test_granting_credit_no_access_token_raises(self):
+        session = FakeSession({
+            "common.validcode.CheckValidCode": lambda: _resp({"code": 10000, "data": {}}),
+        })
+        client = ImouClient(session, session_id="s", token="t", internal_username="u",
+                            api_host="https://gw.example.com")
+        with pytest.raises(ImouAPIError):
+            await client.async_granting_credit("13800000000", "123456")
+
+
+class TestMessageDomain:
+    """消息域(R13):iot.message.* 用 apiver=V10.2.2 + charset=UTF-8."""
+
+    def _client(self, session) -> ImouClient:
+        return ImouClient(session, session_id="s", token="t", internal_username="u",
+                          api_host="https://gw.example.com")
+
+    async def test_secret_list_uses_msg_domain(self):
+        session = FakeSession({
+            "iot.message.SmartLockSecretListV2": lambda: _resp({"code": 10000, "data": {}}),
+        })
+        await self._client(session).async_smart_lock_secret_list("SN", "PID")
+        _, kwargs = session.calls_full[0]
+        headers = kwargs["headers"]
+        assert headers["x-pcs-apiver"] == "V10.2.2"
+        assert headers["Content-Type"] == "application/json; charset=UTF-8"
+
+    async def test_secret_add_payload_and_domain(self):
+        session = FakeSession({
+            "iot.message.SmartLockSecretAdd": lambda: _resp({"code": 10000, "data": {}}),
+        })
+        await self._client(session).async_smart_lock_secret_add(
+            "SN", "PID", "12345678", name="Test", number=-1, effect_days=1,
+            usage_period="127-20260903T0000Z-20260904T2359Z",
+        )
+        api, kwargs = session.calls_full[0]
+        assert kwargs["headers"]["x-pcs-apiver"] == "V10.2.2"
+        body = json.loads(kwargs["data"])
+        p = body["data"]
+        assert p["tempKey"] == "12345678"
+        assert p["type"] == 3
+        assert p["number"] == -1
+        assert p["createTime"] > 0
+        assert p["expiredTime"] > p["createTime"]
+        assert p["usagePeriod"].startswith("127-")
+        assert p["keyId"] > 0  # 客户端生成
+
+    async def test_secret_delete_domain_and_payload(self):
+        session = FakeSession({
+            "iot.message.SmartLockSecretDelete": lambda: _resp({"code": 10000, "data": {}}),
+        })
+        await self._client(session).async_smart_lock_secret_delete(
+            "SN", "PID", 67330355, extra={"type": 3, "name": "x"}
+        )
+        api, kwargs = session.calls_full[0]
+        assert kwargs["headers"]["x-pcs-apiver"] == "V10.2.2"
+        body = json.loads(kwargs["data"])
+        assert body["data"]["keyId"] == 67330355
+        assert body["data"]["name"] == "x"
 
 
 class TestSmsLogin:

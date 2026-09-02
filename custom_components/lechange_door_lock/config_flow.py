@@ -72,7 +72,12 @@ async def http_login_sms(username: str, valid_code: str) -> dict:
 
 
 async def http_send_code(username: str) -> bool:
-    """Best-effort SMS code send (GetValidCode); failure is non-fatal."""
+    """Best-effort SMS code send (GetValidCode, usage=SMSLogin).
+
+    实测(2026-09-03):登录类 usage 发送被风控拦截(12114 need geetest4 captcha
+    verify,服务端下发 verifyToken);GenerateSnapkey 类可直发(10000)。
+    失败非致命:引导用户从乐橙 App 获取验证码。
+    """
     async with aiohttp.ClientSession() as session:
         client = ImouClient(session)
         try:
@@ -99,15 +104,15 @@ async def http_list_devices(username: str, password: str, session_data: dict) ->
 
 
 def _login_error(err: ImouAPIError) -> str:
-    """Map login error codes to a config-flow error key."""
+    """Map login error codes to a config-flow error key (人机验证指南 §2/§4)."""
     if err.code == -4:
         return "no_devices"
     if err.code in (-2, -3):
         return "network"
+    if err.code in (11006, 11007, 11012, 12000, 2033, 2036):
+        return "captcha_needed"      # 风控/极验 GT4(需在乐橙 App 完成滑块)
     if err.code in (2026, 2032, 2016):
-        return "sms_needed"      # 需要短信验证码/双因素验证
-    if err.code in (2033, 2036):
-        return "captcha_needed"  # 需要人机验证(极验)
+        return "sms_needed"          # 需要短信验证码/两步验证
     if err.code in (2011, 2015, 3036):
         return "invalid_auth"
     return "invalid_auth"
@@ -134,7 +139,7 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="user", data_schema=LOGIN_METHOD_SCHEMA, errors=errors)
 
     async def async_step_password(self, user_input: Optional[dict] = None) -> FlowResult:
-        """账号密码登录(失败提示验证码类错误)."""
+        """账号密码登录(风控时引导到乐橙 App 完成人机验证后重试)."""
         errors = {}
         if user_input is not None:
             try:
@@ -155,7 +160,7 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_sms(self, user_input: Optional[dict] = None) -> FlowResult:
-        """短信验证码登录:提示先在乐橙 App 获取验证码(自动发送 best-effort)."""
+        """短信验证码登录:验证码从乐橙 App 获取(自动发送 best-effort,受风控限制)."""
         errors = {}
         if user_input is None:
             await http_send_code(self._username)  # best-effort,失败仅提示

@@ -74,25 +74,49 @@ def _b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
 
 
+# 账号 AES-GCM 加密(指南 §4.2 / n40/h.s()):
+#   key=SHA256("F9TtRyv7X89nM0vp2EKOjdKLFnjlrN9rENCRYPTKEY")
+#   随机 12B nonce 前置 + AES-256-GCM(密文+tag),整体 Base64 —— 已实测服务端可解
+_ENCRYPT_KEY = hashlib.sha256(b"F9TtRyv7X89nM0vp2EKOjdKLFnjlrN9rENCRYPTKEY").digest()
+
+
+def _enc_account(account: str) -> str | None:
+    """App 同款账号加密 (isEncrypt=true 时必须);无 pycryptodome 时返回 None."""
+    try:
+        from Crypto.Cipher import AES  # 可选依赖:仅加密场景需要
+    except ImportError:
+        return None
+    nonce = random.randbytes(12)
+    cipher = AES.new(_ENCRYPT_KEY, AES.MODE_GCM, nonce=nonce)
+    ct, tag = cipher.encrypt_and_digest(account.encode())
+    return _b64(nonce + ct + tag)
+
+
 def _hmac_sha256_b64(data: str, key: str) -> str:
     return _b64(hmac.new(key.encode(), data.encode(), hashlib.sha256).digest())
 
 
-def _build_client_ua() -> str:
-    """Base64(JSON) user-agent, same shape as the Android client."""
+def _build_client_ua(terminal_id: str = "") -> str:
+    """Base64(JSON) user-agent, same shape as the Android client.
+
+    终端标识必须独立于手机 App:集成使用安装时固定生成的 UUID(避免与
+    用户手机 App 的 terminalId 冲突 → 顶号掉线);terminalModel/Brand 用
+    HA 特征值(非 iPhone/Apple),保证作为"另一台终端"存在。
+    """
+    tid = terminal_id or ("lechange-" + hashlib.md5(str(time.time()).encode()).hexdigest()[:16])
     data = {
         "clientType": "android",
         "clientVersion": "10.2.2.0831",
         "clientOV": "15",
         "clientOS": "android",
-        "terminalModel": "HA-Integration",
-        "terminalId": "lechange-" + str(int(time.time())),
+        "terminalModel": "HA-Integration-Box",
+        "terminalId": tid,
         "appid": APP_ID,
         "project": PROJECT,
         "language": "zh-CN",
         "clientProtocolVersion": PROTO_VER,
         "timezoneOffset": "480",
-        "terminalBrand": "Custom",
+        "terminalBrand": "Generic",
         "country": "CN",
         "darkMode": "0",
     }
@@ -107,17 +131,26 @@ def _sign_payload(
     key1: str,
     key2: str,
     session_id: Optional[str] = None,
+    apiver: str = APIVER,
+    content_type: str = "application/json; charset=utf-8",
+    terminal_id: str = "",
 ):
-    """Build the x-pcs request headers for one request."""
+    """Build the x-pcs request headers for one request.
+
+    apiver/Content-Type 分域(接口测试报告 R13):
+      用户/设备域  apiver=191204, charset=utf-8
+      消息域        apiver=V10.2.2, charset=UTF-8(iot.message.* / 服务端生成类)
+    terminal_id: 集成固定终端标识(避免与手机 App 同终端而互相顶号)
+    """
     nonce = "".join(random.choices(string.ascii_letters + string.digits, k=64))
     date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    ua = _build_client_ua()
+    ua = _build_client_ua(terminal_id)
     body_md5 = _b64(hashlib.md5(body).digest())
     body_sha256 = _b64(hashlib.sha256(body).digest())
 
     def sign_base(digest_line: str) -> str:
-        s = f"{method}\n{uri_path}\n{digest_line}\napplication/json; charset=utf-8\n"
-        s += f"x-pcs-apiver:{APIVER}\nx-pcs-client-ua:{ua}\nx-pcs-date:{date}\n"
+        s = f"{method}\n{uri_path}\n{digest_line}\n{content_type}\n"
+        s += f"x-pcs-apiver:{apiver}\nx-pcs-client-ua:{ua}\nx-pcs-date:{date}\n"
         s += f"x-pcs-nonce:{nonce}\n"
         if session_id:
             s += f"x-pcs-session-id:{session_id}\n"
@@ -126,11 +159,11 @@ def _sign_payload(
 
     headers = {
         "x-pcs-username": username,
-        "x-pcs-apiver": APIVER,
+        "x-pcs-apiver": apiver,
         "x-pcs-nonce": nonce,
         "x-pcs-date": date,
         "x-pcs-client-ua": ua,
-        "Content-Type": "application/json; charset=utf-8",
+        "Content-Type": content_type,
         "Content-MD5": body_md5,
         "x-pcs-signature": _hmac_sha256_b64(sign_base(body_md5), key1),
         "Content-SHA256": body_sha256,
@@ -172,7 +205,10 @@ class ImouClient:
         internal_username: str = "",
         api_host: str = "",
         on_session_update=None,
+        terminal_id: str = "",
     ):
+        import uuid as _uuid
+
         self._session = session
         self.username = username        # 账号(登录用 "account\" + username)
         self.password = password
@@ -180,6 +216,8 @@ class ImouClient:
         self.token = token
         self.internal_username = internal_username
         self.api_host = api_host or API_ENTRY_HOST
+        # 独立终端标识(与手机 App 不同 → 不互顶;集成侧由 entry.options 持久化)
+        self.terminal_id = terminal_id or "lechange-hass-" + _uuid.uuid4().hex[:16]
 
         self._model_cache: dict[str, "ModelInfo"] = {}
         self._on_session_update = on_session_update  # callable(session dict) -> None
@@ -242,7 +280,7 @@ class ImouClient:
         key2 = _sha256_hex_lower(_sha256_hex_lower(password))
         headers = _sign_payload(
             "POST", API_PREFIX + "user.account.GetToken", body,
-            "account\\" + username, key1, key2,
+            "account\\" + username, key1, key2, terminal_id=self.terminal_id,
         )
         data = await self._http_post(self.api_host, API_PREFIX + "user.account.GetToken",
                                      body, headers)
@@ -252,19 +290,106 @@ class ImouClient:
         return await self._apply_login_response(username, data)
 
     # ------------------------------------------------------- 短信验证码登录
-    async def async_send_sms_code(self, account: str, area_code: str = "") -> dict:
-        """发送短信验证码 (common.validcode.GetValidCode, App 源码取证).
+    async def async_send_sms_code(
+        self,
+        account: str,
+        usage: str = "SMSLogin",
+        area_code: str = "+86",
+        country: str = "CN",
+        is_encrypt: bool = False,
+    ) -> dict:
+        """发送短信验证码 (common.validcode.GetValidCode, 人机验证接口对接指南 §1).
 
-        依据: q40/c.java → type=AccountType.type("phone"), usage=Usage.name
-              (登录/绑定场景 usage 枚举名,登录取 "ChangeAccount")。
+        依据指南:usage 与业务一一对应(登录=Login / 短信登录=SMSLogin /
+        生成临时密码=GenerateSnapkey);App 真机 isEncrypt=true(账号 AES-GCM 加密,
+        见 n40/h.s()),不想处理加密可先传明文 isEncrypt:false 实测(服务端策略为准)。
         """
         return await self.async_post(
             "common.validcode.GetValidCode",
-            {"account": account, "areaCode": area_code, "type": "phone",
-             "usage": "ChangeAccount"},
+            {
+                "type": "phone",
+                "usage": usage,
+                "account": account,
+                "areaCode": area_code,
+                "country": country,
+                "isEncrypt": is_encrypt,
+                "isUserSelected": False,
+                "extraSendOptions": [],
+                "accessToken": "",
+            },
         )
 
     async def async_login_sms(self, account: str, valid_code: str, area_code: str = "") -> dict:
+        """短信验证码登录 (user.account.GetTokenBySMS, App 源码取证).
+
+        请求: {account, areaCode, validCode};响应与 GetToken 同构
+        ({sessionId, token, username, entryUrlV2, newUser}) → 同一套密钥切换。
+        实测(2026-09-03):未登录签名密钥不可外部派生(11010),集成短信登录
+        依赖 App 获取验证码;本方法保留供上下文合规/后续复测。
+        """
+        body = json.dumps(
+            {"data": {"account": account, "areaCode": area_code, "validCode": valid_code}},
+            separators=(",", ":"),
+        ).encode()
+        key1 = _md5_hex_lower(_md5_hex_lower(valid_code))
+        key2 = _sha256_hex_lower(_sha256_hex_lower(valid_code))
+        headers = _sign_payload(
+            "POST", API_PREFIX + "user.account.GetTokenBySMS", body,
+            "account\\" + account, key1, key2, terminal_id=self.terminal_id,
+        )
+        data = await self._http_post(self.api_host, API_PREFIX + "user.account.GetTokenBySMS",
+                                     body, headers)
+        self.username = account
+        self.password = ""  # 短信登录无密码,自动重登不可用(需重新配置)
+        return await self._apply_login_response(account, data)
+
+    async def async_check_valid_code(
+        self, account: str, valid_code: str, usage: str = "SMSLogin", type_: str = "phone"
+    ) -> dict:
+        """校验验证码 → accessToken (common.validcode.CheckValidCode, 指南 §1.2).
+
+        一次校验一用(用于后续单笔业务);返回 data.accessToken。
+        """
+        return await self.async_post(
+            "common.validcode.CheckValidCode",
+            {
+                "type": type_,
+                "usage": usage,
+                "account": account,
+                "validCode": valid_code,
+                "isEncrypt": False,
+            },
+        )
+
+    async def async_granting_credit(
+        self, account: str, sms_code: str, type_: str = "grantingCredit",
+        is_encrypt: bool = True,
+    ) -> dict:
+        """终端授权提交 (user.account.GrantingCredit, 终端绑定逻辑分析.md §一).
+
+        正确链(2026-09-03 分析):
+          GetValidCode(usage=GrantingCredit) → 短信码 → **CheckValidCode →
+          {accessToken}** → GrantingCredit.validCode = **accessToken**(非短信码!)
+        实测:直接拿短信码提交 → 11001 bad request(鉴权未提前校验)。
+        本方法自动完成中间步:短信码 → accessToken → 授权提交。
+        """
+        # 1) 短信码 → accessToken(一次一用)
+        checked = await self.async_check_valid_code(
+            account, sms_code, usage="GrantingCredit"
+        )
+        access_token = (checked or {}).get("accessToken")
+        if not access_token:
+            raise ImouAPIError(-1, "no accessToken from CheckValidCode")
+        # 2) 授权提交(账号加密,App 同款)
+        enc_account = _enc_account(account) if is_encrypt else account
+        if is_encrypt and enc_account is None:
+            _LOGGER.warning("未安装 pycryptodome,终端授权改用明文提交(可能被服务端拒绝)")
+            enc_account, is_encrypt = account, False
+        return await self.async_post(
+            "user.account.GrantingCredit",
+            {"account": enc_account, "isEncrypt": is_encrypt, "type": type_,
+             "validCode": access_token},
+        )
         """短信验证码登录 (user.account.GetTokenBySMS, App 源码取证).
 
         请求: {account, areaCode, validCode};响应与 GetToken 同构
@@ -278,7 +403,7 @@ class ImouClient:
         key2 = _sha256_hex_lower(_sha256_hex_lower(valid_code))
         headers = _sign_payload(
             "POST", API_PREFIX + "user.account.GetTokenBySMS", body,
-            "account\\" + account, key1, key2,
+            "account\\" + account, key1, key2, terminal_id=self.terminal_id,
         )
         data = await self._http_post(self.api_host, API_PREFIX + "user.account.GetTokenBySMS",
                                      body, headers)
@@ -337,14 +462,26 @@ class ImouClient:
 
         raise ImouAPIError(-3, f"TLS verification failed for {host}: {last_err}")
 
-    async def async_post(self, api_name: str, payload: dict, retry_auth: bool = True) -> dict:
-        """Signed POST to `/pcs/v1/{api_name}` with session headers."""
+    async def async_post(
+        self,
+        api_name: str,
+        payload: dict,
+        retry_auth: bool = True,
+        apiver: str = APIVER,
+        content_type: str = "application/json; charset=utf-8",
+    ) -> dict:
+        """Signed POST to `/pcs/v1/{api_name}` with session headers.
+
+        apiver/content_type 分域(R13):用户/设备域默认 191204+utf-8;
+        消息域(iot.message.*/服务端生成类)调用方传 "V10.2.2"+"charset=UTF-8"。
+        """
         await self.async_ensure_session()
         body = json.dumps({"data": payload}, separators=(",", ":")).encode()
         headers = _sign_payload(
             "POST", API_PREFIX + api_name, body,
             "uuid\\" + self.internal_username,
             self._key1, self._key2, self.session_id,
+            apiver=apiver, content_type=content_type, terminal_id=self.terminal_id,
         )
         try:
             return await self._http_post(self.api_host, API_PREFIX + api_name, body, headers)
@@ -352,8 +489,21 @@ class ImouClient:
             if err.code in AUTH_FAIL_CODES and retry_auth and self.username and self.password:
                 _LOGGER.warning("Session invalid (%s), re-logging in...", err.code)
                 await self.async_login(self.username, self.password)
-                return await self.async_post(api_name, payload, retry_auth=False)
+                return await self.async_post(
+                    api_name, payload, retry_auth=False, apiver=apiver, content_type=content_type
+                )
             raise
+
+    # 消息域常量(接口测试报告 R13)
+    MSG_APIVER = "V10.2.2"
+    MSG_CONTENT_TYPE = "application/json; charset=UTF-8"
+
+    async def async_post_msg(self, api_name: str, payload: dict, retry_auth: bool = True) -> dict:
+        """消息域 POST(iot.message.* 等):apiver=V10.2.2, charset=UTF-8."""
+        return await self.async_post(
+            api_name, payload, retry_auth=retry_auth,
+            apiver=self.MSG_APIVER, content_type=self.MSG_CONTENT_TYPE,
+        )
 
     @staticmethod
     def _normalize_device(dev: dict) -> dict:
@@ -503,6 +653,10 @@ class ImouClient:
         return await self.async_post("iot.control.SetProperties", payload)
 
     # ------------------------------------------- 云消息 API(设备休眠也可用)
+    # 说明:临时密码相关接口均走「消息域」(apiver=V10.2.2, charset=UTF-8, 测试报告 R13),
+    # 且**不使用** iot.control.SetService(CreateDeviceSnapkey)——老接口可能触发
+    # 身份验证码/风控(热更分析:SetService 前置 GetValidCode/CheckValidCode)。
+    # 按 R14:keyId/tempKey 由客户端生成,经 SmartLockSecretAdd 直接登记(实测 10000)。
     async def async_smart_lock_secret_list(
         self, device_id: str, product_id: str, types: int = 3
     ) -> dict:
@@ -510,7 +664,7 @@ class ImouClient:
 
         types=3 → 临时密钥分组;返回 secretGroups[]。
         """
-        return await self.async_post(
+        return await self.async_post_msg(
             "iot.message.SmartLockSecretListV2",
             {"productId": product_id, "deviceId": device_id, "types": types},
         )
@@ -525,15 +679,18 @@ class ImouClient:
         number: int = -1,
         effect_days: int = 1,
         usage_period: str = "",
-        key_id: int = 0,
+        key_id: Optional[int] = None,
     ) -> dict:
-        """添加临时密码 (iot.message.SmartLockSecretAdd, 抓包验证 code=10000).
+        """添加临时密码 (iot.message.SmartLockSecretAdd; 消息域 apiver=V10.2.2).
 
-        tempKey 由调用方生成;usagePeriod 如 '127-20260903T0000Z-20260904T2359Z'。
+        R14 合规:keyId 随机、tempKey 8 位、createTime/expiredTime 必须真实 epoch 秒、
+        type=3、usagePeriod 周位图(127=整周)。
         """
+        import random as _random
         import time as _time
 
         now = _time.time()
+        key_id = key_id if key_id else _random.randint(10000000, 999999999)
         payload = {
             "productId": product_id,
             "deviceId": device_id,
@@ -552,7 +709,23 @@ class ImouClient:
             "expiredTime": int(now) + 86400 * max(effect_days, 1),
             "usagePeriod": usage_period or "127-",
         }
-        return await self.async_post("iot.message.SmartLockSecretAdd", payload)
+        return await self.async_post_msg("iot.message.SmartLockSecretAdd", payload)
+
+    async def async_smart_lock_secret_delete(
+        self,
+        device_id: str,
+        product_id: str,
+        key_id: int,
+        extra: Optional[dict] = None,
+    ) -> dict:
+        """删除临时密码 (iot.message.SmartLockSecretDelete; 消息域).
+
+        R14: 删除需尽量全字段(仅 state=1 的条目真正移除)。
+        """
+        payload = {"productId": product_id, "deviceId": device_id, "keyId": key_id}
+        if extra:
+            payload.update(extra)
+        return await self.async_post_msg("iot.message.SmartLockSecretDelete", payload)
 
     async def async_get_alarm_messages(
         self,

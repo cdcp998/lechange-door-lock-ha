@@ -18,7 +18,7 @@
       },
       "sms": {
         "title": "SMS code login",
-        "description": "Account {username}: first get an SMS code in the **LeChange app** (SMS login / forgot-password page), then enter the 6-digit code. (The integration also tries to send one automatically; if none arrives, use the app.)",
+        "description": "Account {username}: first get an SMS code in the **LeChange app** (SMS login / forgot-password page), then enter the 6-digit code.\n\n(The integration also tries to send one; in practice unauthenticated sends are blocked by server anti-abuse (11010) — use the app if none arrives.)",
         "data": {
           "valid_code": "SMS code (6 digits)"
         }
@@ -32,9 +32,9 @@
       }
     },
     "error": {
-      "invalid_auth": "Invalid account or password (or captcha required).",
+      "invalid_auth": "Invalid account or password.",
       "sms_needed": "This account requires an SMS/two-step code; switch to the SMS-code login method.",
-      "captcha_needed": "Human verification (Geetest) is required; verify in the LeChange app first or retry later.",
+      "captcha_needed": "Anti-abuse / human verification (Geetest GT4) triggered. Complete one slider check in the **LeChange app** to unlock the account, then retry.",
       "no_devices": "No devices found under this account.",
       "network": "Network error, please retry later.",
       "unknown": "Unexpected error."
@@ -142,6 +142,9 @@
       },
       "wake_up": {
         "name": "Wake up"
+      },
+      "snapshot_door": {
+        "name": "Capture door snapshot"
       },
       "generate_snapkey": {
         "name": "Generate temporary password"
