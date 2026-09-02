@@ -120,13 +120,14 @@ class LeChangeGenerateSnapkeyButton(_BaseLeChangeButton):
                 "effectPeriod": coordinator.get_snapkey_periods(config),
             },
         )
-        if not result:
-            raise HomeAssistantError("Generate temporary password failed")
-        coordinator.set_snapkey_result(result)
+        # 服务调用成功即视为完成(部分固件无出参时 result 为空 dict)
+        coordinator.set_snapkey_result(result or {})
         coordinator.hass.bus.async_fire(
             EVENT_PREFIX,
             {"type": "snapkey_created", "device_id": self._device_id, "result": result},
         )
+        self.async_write_ha_state()  # 立即刷新按钮的 last_generated_* 属性
+        await coordinator.async_request_refresh()
         _LOGGER.info("Temporary password generated for %s", self._device_id)
 
 
@@ -152,4 +153,5 @@ class LeChangeRefreshSnapkeyListButton(_BaseLeChangeButton):
             EVENT_PREFIX,
             {"type": "snapkey_list", "device_id": self._device_id, "result": result},
         )
+        await coordinator.async_request_refresh()
         _LOGGER.info("Temporary password list refreshed for %s", self._device_id)

@@ -263,7 +263,9 @@ async def async_create_snapkey(call: ServiceCall):
             "effectPeriod": call.data["effect_period"],
         },
     )
+    coordinator.set_snapkey_result(result or {})
     _fire_event(hass, "snapkey_created", device_id, result=result)
+    await coordinator.async_request_refresh()
 
 
 async def async_get_snapkey_list(call: ServiceCall):
@@ -278,7 +280,10 @@ async def async_get_snapkey_list(call: ServiceCall):
         "GetDeviceSnapkeys",
         {"offset": call.data["offset"], "count": call.data["count"]},
     )
+    if isinstance(result, dict):
+        coordinator.set_snapkey_list(result.get("keys") or [])
     _fire_event(hass, "snapkey_list", device_id, result=result)
+    await coordinator.async_request_refresh()
 
 
 async def async_get_open_door_record(call: ServiceCall):

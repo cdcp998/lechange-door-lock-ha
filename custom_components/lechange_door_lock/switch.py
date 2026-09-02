@@ -56,7 +56,11 @@ class _BaseLeChangeSwitch(CoordinatorEntity, SwitchEntity):
 
     async def _set_on(self, on: bool) -> None:
         coordinator = self.coordinator
-        value: bool | int = 1 if (self._is_enum and on) else (0 if self._is_enum else on)
+        if self._is_enum:
+            # enum 属性与设备返回形态一致:字符串 "1"/"0"
+            value = "1" if on else "0"
+        else:
+            value = on
         await coordinator.api.async_set_properties(
             coordinator.device_id, coordinator.product_id, {self._prop: value}
         )

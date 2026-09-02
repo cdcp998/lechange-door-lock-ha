@@ -327,7 +327,8 @@ class ImouClient:
         try:
             data = await self.async_post(
                 "device.list.DeviceBasicInfoQueryV2",
-                {"offset": 1, "limit": 50, "transferStr": "", "groupId": "", "familyId": ""},
+                {"offset": 1, "limit": 50, "transferStr": "", "groupId": "",
+                 "familyId": "", "needNewSecret": True},
             )
         except ImouAPIError as err:
             _LOGGER.warning("DeviceBasicInfoQueryV2 failed (%s), trying BasicList", err)

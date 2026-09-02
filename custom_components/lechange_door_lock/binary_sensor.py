@@ -124,8 +124,10 @@ class LeChangeChannelOnlineSensor(_BaseLeChangeBinarySensor):
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
 
     def __init__(self, coordinator, device_id: str, channel_id: str) -> None:
-        super().__init__(coordinator, device_id, "channel_online")
+        # unique_id 必须带通道号,避免多通道实体 id 冲突
+        super().__init__(coordinator, device_id, f"channel_{channel_id}_online")
         self._channel_id = channel_id
+        self._attr_translation_key = "channel_online"
         self._attr_translation_placeholders = {"channel_id": channel_id}
 
     @property
