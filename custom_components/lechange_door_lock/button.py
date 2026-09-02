@@ -108,20 +108,9 @@ class LeChangeGenerateSnapkeyButton(_BaseLeChangeButton):
 
     async def async_press(self) -> None:
         coordinator = self.coordinator
-        config = coordinator.snapkey_config
-        result = await coordinator.api.async_set_service(
-            coordinator.device_id,
-            coordinator.product_id,
-            "CreateDeviceSnapkey",
-            {
-                "name": config["name"],
-                "effectTimes": config["effective_day"],
-                "number": config["effective_num"],
-                "effectPeriod": coordinator.get_snapkey_periods(config),
-            },
-        )
-        # 服务调用成功即视为完成(部分固件无出参时 result 为空 dict)
-        coordinator.set_snapkey_result(result or {})
+        # 抓包验证的云消息 API:设备休眠也可生成临时密码
+        result = await coordinator.async_create_snapkey_cloud()
+        coordinator.set_snapkey_result(result)
         coordinator.hass.bus.async_fire(
             EVENT_PREFIX,
             {"type": "snapkey_created", "device_id": self._device_id, "result": result},
@@ -139,16 +128,14 @@ class LeChangeRefreshSnapkeyListButton(_BaseLeChangeButton):
 
     async def async_press(self) -> None:
         coordinator = self.coordinator
-        result = await coordinator.api.async_set_service(
-            coordinator.device_id,
-            coordinator.product_id,
-            "GetDeviceSnapkeys",
-            {"offset": 0, "count": 100},
+        # 抓包验证的云消息 API:设备休眠也可查询临时密码分组
+        result = await coordinator.api.async_smart_lock_secret_list(
+            coordinator.device_id, coordinator.product_id, types=3
         )
-        keys = result.get("keys") if isinstance(result, dict) else None
-        if keys is None:
+        groups = result.get("secretGroups") if isinstance(result, dict) else None
+        if groups is None:
             raise HomeAssistantError("Get temporary password list failed")
-        coordinator.set_snapkey_list(keys)
+        coordinator.set_snapkey_list(groups)
         coordinator.hass.bus.async_fire(
             EVENT_PREFIX,
             {"type": "snapkey_list", "device_id": self._device_id, "result": result},

@@ -34,7 +34,8 @@
 - **远程控制**：远程开门、唤醒设备按钮。
 - **📹 视频**：每个摄像头通道生成 camera 实体，默认使用云端流媒体网关地址，支持局域网 RTSP / go2rtc 中转（在集成选项里配置地址）。
 - **🗣️ 对话**：应答/拒绝/挂断门铃呼叫（CallAnswer/CallRefuse/CallHangup）、获取/设置语音回复（GetVoiceReply/SetVoiceReply）。
-- **🔑 临时密码**：**实体化配置**（名称/使用次数/有效天数/生效星期/时间段，number·select·text·time 四类实体）+「生成临时密码」「刷新列表」按钮 + 数量传感器；兼容 `create_snapkey`/`get_snapkey_list` 服务。
+- **🔑 临时密码**：**实体化配置**（名称/使用次数/有效天数/生效星期/时间段，number·select·text·time 四类实体）+「生成临时密码」「刷新列表」按钮 + 数量传感器；基于抓包验证的云消息 API（`iot.message.SmartLockSecretAdd/ListV2`），**设备休眠也可生成**；兼容 `create_snapkey`/`get_snapkey_list` 服务。
+- **云侧告警**：轮询 `cloud.message.GetDeviceAlarmMixMessage`（抓包验证，设备休眠照常返回），新告警触发 `alarm` 事件，`最新告警` 传感器展示标签/时间/消息。
 - **开门记录**：轮询 `lockNoteReport` 属性，新记录会触发事件。
 - **会话自动续期**：会话失效时自动使用存储的账号密码重新登录。
 - **国际化**：内置中文、英文界面翻译。
@@ -118,6 +119,7 @@
 - `voice_reply_list` / `voice_reply_set` / `snapkey_created` / `snapkey_list`
 - `open_door_records` / `set_properties` / `service_result`
 - `open_record`（新开门记录，含 `record` 字段，如用户/方式）
+- `alarm`（新云侧告警，含 `alarm` 字段：labelType/refId/time/message，设备休眠可用）
 
 #### 自动化示例：门铃呼叫后应答
 ```yaml
@@ -167,8 +169,9 @@ CI(`.github/workflows/hacs.yml`)同时运行 [HACS Action](https://github.com/ha
 
 ### 📜 更新日志
 统一更新日志见 [CHANGELOG.md](CHANGELOG.md)(发布时 CI 会自动提取并作为 Release 说明)。
-- **v1.3.0 (2026-09-03, 当前)**: 临时密码实体化配置(number/select/text/time)+ 生成/刷新按钮 + 数量传感器;最近开门时间/方式传感器;通道在线状态。(功能移植自社区分支持续改进)
-- **v1.2.0 (2026-09-03)**: 客户端私有云协议迁移;门锁/开关/摄像头(默认云端流媒体网关)/对话实体与服务;单测 50 例 + HACS/发布 CI;MIT LICENSE 与免责声明;修复登录会话死锁。(v1.1.0 为开发中间版本,已并入)
+- **v1.4.0 (2026-09-03, 当前)**: 临时密码改用抓包验证的云消息 API(设备休眠也可生成/列表);云侧告警轮询与 `alarm` 事件、最新告警传感器;单设备详情 API;通道在线 unique_id 等修复。(抓包证据存本地 API/capture,公开仓库不含)
+- **v1.3.0 (2026-09-03)**: 临时密码实体化配置(number/select/text/time)+ 生成/刷新按钮 + 数量传感器;最近开门时间/方式传感器;通道在线状态。(功能移植自社区分支持续改进)
+- **v1.2.0 (2026-09-03)**: 客户端私有云协议迁移;门锁/开关/摄像头(默认云端流媒体网关)/对话实体与服务;单测 + HACS/发布 CI;MIT LICENSE 与免责声明;修复登录会话死锁。(v1.1.0 为开发中间版本,已并入)
 - **v1.0.1 (2026-03-11)**: 添加开门记录(旧接口版本)。
 - **v1.0.0 (2026-03-10)**: 首次发布(旧开放平台接口版本)。
 

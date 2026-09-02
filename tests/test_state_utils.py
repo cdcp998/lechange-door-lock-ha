@@ -1,13 +1,17 @@
 """Tests for pure state-derivation helpers."""
 
+from datetime import datetime
+
 from lechange_door_lock.state_utils import (
     build_snapkey_periods,
+    build_usage_period,
     derive_door_state,
     derive_lock_state,
     extract_batteries,
     format_open_door_time,
     normalize_wifi,
     open_method_label,
+    weekday_bitmask,
     weekday_mode_to_periods,
 )
 
@@ -131,3 +135,32 @@ class TestOpenRecordDisplay:
         assert open_method_label(2) == "指纹"
         assert open_method_label("15") == "远程用户"
         assert open_method_label(99) == "99"
+
+
+class TestUsagePeriod:
+    """依据抓包:'127-20260903T0000Z-20260904T2359Z'(247/263 记录)."""
+
+    def test_bitmask_every_day(self):
+        assert weekday_bitmask("Every day") == 127
+
+    def test_bitmask_weekdays(self):
+        # bit0=周日..bit6=周六:工作日=周一到周五 = 0b0111110 = 62
+        assert weekday_bitmask("Weekdays") == 62
+
+    def test_bitmask_weekend(self):
+        # 周日+周六 = 0b1000001 = 65
+        assert weekday_bitmask("Weekend") == 65
+
+    def test_bitmask_single_day(self):
+        assert weekday_bitmask("Sunday") == 1
+        assert weekday_bitmask("Monday") == 2
+
+    def test_build_usage_period_shape(self):
+        now = datetime(2026, 9, 3, 12, 0, 0)
+        period = build_usage_period("Every day", 1, now)
+        assert period == "127-20260903T0000Z-20260904T2359Z"
+
+    def test_build_usage_period_multiple_days(self):
+        now = datetime(2026, 9, 3, 12, 0, 0)
+        period = build_usage_period("Weekdays", 3, now)
+        assert period == "62-20260903T0000Z-20260906T2359Z"

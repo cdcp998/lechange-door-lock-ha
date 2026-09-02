@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from .const import KEY_TYPE_NAMES, WEEKDAYS, WEEKDAY_TO_PERIOD
@@ -109,6 +109,32 @@ def build_snapkey_periods(
         {"period": p, "beginTime": begin_time, "endTime": end_time}
         for p in weekday_mode_to_periods(weekday_mode)
     ]
+
+
+def weekday_bitmask(mode: str) -> int:
+    """星期位掩码(smartLockSecretAdd 的 usagePeriod 前缀)。
+
+    位定义与设备模型 period 枚举一致:bit0=周日 .. bit6=周六;127=每天。
+    依据抓包:`"usagePeriod":"127-20260903T0000Z-20260904T2359Z"`。
+    """
+    return sum(1 << p for p in weekday_mode_to_periods(mode))
+
+
+def build_usage_period(
+    weekday_mode: str, effect_days: int, now: Optional[datetime] = None
+) -> str:
+    """构建 SmartLockSecretAdd.usagePeriod,如 '127-20260903T0000Z-20260904T2359Z'.
+
+    结束日期 = 开始日期 + 有效天数(App 抓包:effectTimes=1 → 当日00:00 至次日23:59)。
+    """
+    if now is None:
+        now = datetime.now()
+    begin = now.date()
+    end = begin + timedelta(days=max(int(effect_days), 1))
+    mask = weekday_bitmask(weekday_mode)
+    return (
+        f"{mask}-{begin.strftime('%Y%m%d')}T0000Z-{end.strftime('%Y%m%d')}T2359Z"
+    )
 
 
 # ------------------------------------------------------------- 开门记录展示

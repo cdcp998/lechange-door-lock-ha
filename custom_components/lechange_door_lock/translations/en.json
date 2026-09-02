@@ -95,6 +95,9 @@
       },
       "snapkey_count": {
         "name": "Snapkey count"
+      },
+      "latest_alarm": {
+        "name": "Latest alarm"
       }
     },
     "binary_sensor": {

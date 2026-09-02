@@ -315,7 +315,57 @@ class ImouClient:
                 return await self.async_post(api_name, payload, retry_auth=False)
             raise
 
-    # ---------------------------------------------------------------- devices
+    @staticmethod
+    def _normalize_device(dev: dict) -> dict:
+        """Keep only useful fields from a raw device object."""
+        channels = []
+        stream_entry = dev.get("streamEntryAddrV3") or ""
+        for ch in dev.get("channelList") or []:
+            ch_stream_url = ""
+            try:
+                mc = ch.get("mediaConfig")
+                if isinstance(mc, str):
+                    mc = json.loads(mc)
+                if isinstance(mc, dict):
+                    ch_stream_url = mc.get("streamUrl") or ""
+            except (TypeError, ValueError, json.JSONDecodeError):
+                ch_stream_url = ""
+            if not stream_entry and ch_stream_url:
+                stream_entry = ch_stream_url
+            channels.append({
+                "channelId": str(ch.get("channelId", "0")),
+                "channelName": ch.get("channelName") or f"通道{ch.get('channelId', 0)}",
+                "productId": ch.get("productId", ""),
+                "status": ch.get("status", ""),
+                "functions": ch.get("functions") or [],
+                "stream_url": ch_stream_url,
+            })
+        return {
+            "deviceId": dev.get("deviceId", ""),
+            "productId": dev.get("productId", ""),
+            "name": dev.get("name") or dev.get("deviceModelName") or dev.get("deviceId", ""),
+            "model": dev.get("deviceModel") or dev.get("deviceModelName") or "",
+            "catalog": dev.get("catalog", ""),
+            "subCategory": dev.get("subCategory", ""),
+            "status": dev.get("status", ""),
+            "lockState": dev.get("lockState", ""),
+            "version": dev.get("version", ""),
+            "channelNum": dev.get("channelNum", 0),
+            "channels": channels,
+            "properties_map": dev.get("propertiesMap") or "",
+            "stream_entry": stream_entry,
+        }
+
+    async def async_get_device_info(
+        self, device_id: str, product_id: str, channel_id: str = "0"
+    ) -> dict:
+        """单设备完整详情 (device.info.BasicInfoGet, 抓包验证)."""
+        data = await self.async_post(
+            "device.info.BasicInfoGet",
+            {"productId": product_id, "deviceId": device_id, "channelId": channel_id},
+        )
+        return self._normalize_device(data)
+
     async def async_get_devices(self) -> list[dict]:
         """List all devices (lock devices carry catalog=SmartLock).
 
@@ -336,47 +386,7 @@ class ImouClient:
                 "device.list.BasicList", {"offset": 1, "limit": 50}
             )
         devices = data.get("deviceList") or []
-        # Normalize: keep only useful fields
-        out = []
-        for dev in devices:
-            channels = []
-            stream_entry = dev.get("streamEntryAddrV3") or ""
-            for ch in dev.get("channelList") or []:
-                ch_stream_url = ""
-                try:
-                    mc = ch.get("mediaConfig")
-                    if isinstance(mc, str):
-                        mc = json.loads(mc)
-                    if isinstance(mc, dict):
-                        ch_stream_url = mc.get("streamUrl") or ""
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    ch_stream_url = ""
-                if not stream_entry and ch_stream_url:
-                    stream_entry = ch_stream_url
-                channels.append({
-                    "channelId": str(ch.get("channelId", "0")),
-                    "channelName": ch.get("channelName") or f"通道{ch.get('channelId', 0)}",
-                    "productId": ch.get("productId", ""),
-                    "status": ch.get("status", ""),
-                    "functions": ch.get("functions") or [],
-                    "stream_url": ch_stream_url,
-                })
-            out.append({
-                "deviceId": dev.get("deviceId", ""),
-                "productId": dev.get("productId", ""),
-                "name": dev.get("name") or dev.get("deviceModelName") or dev.get("deviceId", ""),
-                "model": dev.get("deviceModel") or dev.get("deviceModelName") or "",
-                "catalog": dev.get("catalog", ""),
-                "subCategory": dev.get("subCategory", ""),
-                "status": dev.get("status", ""),
-                "lockState": dev.get("lockState", ""),
-                "version": dev.get("version", ""),
-                "channelNum": dev.get("channelNum", 0),
-                "channels": channels,
-                "properties_map": dev.get("propertiesMap") or "",
-                "stream_entry": stream_entry,
-            })
-        return out
+        return [self._normalize_device(dev) for dev in devices]
 
     @staticmethod
     def is_lock(device: dict) -> bool:
@@ -451,6 +461,90 @@ class ImouClient:
         if channel_id not in (None, ""):
             payload["channelId"] = channel_id
         return await self.async_post("iot.control.SetProperties", payload)
+
+    # ------------------------------------------- 云消息 API(设备休眠也可用)
+    async def async_smart_lock_secret_list(
+        self, device_id: str, product_id: str, types: int = 3
+    ) -> dict:
+        """临时密码分组列表 (iot.message.SmartLockSecretListV2, 抓包验证).
+
+        types=3 → 临时密钥分组;返回 secretGroups[]。
+        """
+        return await self.async_post(
+            "iot.message.SmartLockSecretListV2",
+            {"productId": product_id, "deviceId": device_id, "types": types},
+        )
+
+    async def async_smart_lock_secret_add(
+        self,
+        device_id: str,
+        product_id: str,
+        temp_key: str,
+        *,
+        name: str = "Home Assistant",
+        number: int = -1,
+        effect_days: int = 1,
+        usage_period: str = "",
+        key_id: int = 0,
+    ) -> dict:
+        """添加临时密码 (iot.message.SmartLockSecretAdd, 抓包验证 code=10000).
+
+        tempKey 由调用方生成;usagePeriod 如 '127-20260903T0000Z-20260904T2359Z'。
+        """
+        import time as _time
+
+        now = _time.time()
+        payload = {
+            "productId": product_id,
+            "deviceId": device_id,
+            "keyId": key_id,
+            "type": 3,                      # 临时密钥
+            "groupId": "",
+            "name": name,
+            "phone": "",
+            "tempKey": temp_key,
+            "location": "",
+            "isHijackAlarm": 0,
+            "attribute": 0,
+            "createTime": int(now),
+            "number": number,
+            "effectTimes": effect_days,
+            "expiredTime": int(now) + 86400 * max(effect_days, 1),
+            "usagePeriod": usage_period or "127-",
+        }
+        return await self.async_post("iot.message.SmartLockSecretAdd", payload)
+
+    async def async_get_alarm_messages(
+        self,
+        device_id: str,
+        product_id: str,
+        channel_id: str = "0",
+        count: int = 3,
+        begin_alarm_id: str = "-1",
+        end_alarm_id: int = -1,
+    ) -> dict:
+        """混合告警 (cloud.message.GetDeviceAlarmMixMessage, 抓包验证 code=10000).
+
+        设备休眠时云侧消息照常返回;返回 data.alarms[](alarmId/labelType/refId/time/message)。
+        """
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc) + timedelta(hours=8)  # 设备时区 UTC+8
+        end_day = now.strftime("%Y%m%d") + "T235959"
+        begin_day = (now - timedelta(weeks=4)).strftime("%Y%m%d") + "T000000"
+        payload = {
+            "productId": product_id,
+            "deviceId": device_id,
+            "channelId": channel_id,
+            "beginTime": begin_day,
+            "endTime": end_day,
+            "beginAlarmId": begin_alarm_id,
+            "beginAlarmTime": "",
+            "endAlarmId": end_alarm_id,
+            "count": count,
+            "refreshParentSummary": False,
+        }
+        return await self.async_post("cloud.message.GetDeviceAlarmMixMessage", payload)
 
 
 class ModelInfo:

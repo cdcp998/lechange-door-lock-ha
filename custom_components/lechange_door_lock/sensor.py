@@ -35,6 +35,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
         LeChangeLatestOpenDoorTimeSensor(coordinator, device_id),
         LeChangeLatestOpenDoorMethodSensor(coordinator, device_id),
         LeChangeSnapkeyCountSensor(coordinator, device_id),
+        LeChangeLatestAlarmSensor(coordinator, device_id),
     ]
     async_add_entities(entities, True)
 
@@ -209,7 +210,7 @@ class LeChangeLatestOpenDoorMethodSensor(_BaseLeChangeSensor):
 
 
 class LeChangeSnapkeyCountSensor(_BaseLeChangeSensor):
-    """当前账户下已生成的临时密码数量(按钮刷新后更新)."""
+    """当前账户下已生成的临时密码分组数量(按钮刷新后更新)."""
 
     _attr_icon = "mdi:key-chain-variant"
 
@@ -225,4 +226,37 @@ class LeChangeSnapkeyCountSensor(_BaseLeChangeSensor):
         return {
             "snapkeys": self.coordinator.snapkey_list[-20:],
             "last_generated": self.coordinator.last_snapkey_result,
+        }
+
+
+class LeChangeLatestAlarmSensor(_BaseLeChangeSensor):
+    """最新云侧告警(标签/时间/消息),设备休眠时云消息仍可用."""
+
+    _attr_icon = "mdi:bell-alert-outline"
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "latest_alarm")
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data
+        if not data:
+            return None
+        alarm = data.get("latest_alarm")
+        if not isinstance(alarm, dict):
+            return None
+        label = alarm.get("labelType") or ""
+        timer = format_open_door_time(alarm.get("time")) if alarm.get("time") else ""
+        parts = [p for p in (label, timer) if p]
+        return " · ".join(parts) if parts else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data
+        if not data:
+            return {}
+        alarms = data.get("alarms") or []
+        return {
+            "alarm_count": len(alarms),
+            "alarms": alarms[-10:],
         }

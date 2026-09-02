@@ -10,6 +10,27 @@
 
 ---
 
+## [1.4.0] - 2026-09-03
+
+### 依据(抓包文件)
+- 新增 `API/` 抓包证据:`capture/flow.jsonl`(103 条记录/32 个 API)+ 复现 addon + 说明文档
+  `report/抓包文件说明.md`(**仅存本地,不随仓库公开**)。
+
+### 修复(按抓包验证)
+- **临时密码改走真实 App 云消息 API**:`iot.message.SmartLockSecretAdd`(生成)/
+  `SmartLockSecretListV2`(分组列表)。原 `CreateDeviceSnapkey`/`GetDeviceSnapkeys` 为设备
+  IoT 服务,设备休眠时返回 10003;云消息 API **设备休眠也可用**(与抓包一致,实测 10000)。
+  - `tempKey` 由本地生成(与 App 一致);`usagePeriod` 按抓包格式
+    `星期位掩码-开始日期T0000Z-结束日期T2359Z` 构建。
+- **云侧告警接入**:`cloud.message.GetDeviceAlarmMixMessage`(抓包验证 payload,
+  设备休眠照常返回)→ 每轮询检测新告警并触发 `lechange_door_lock_event`(`type: alarm`),
+  新增「最新告警」传感器;首轮只建基线不刷历史。
+- 单设备详情改用 `device.info.BasicInfoGet`(抓包验证),失败回退列表接口。
+
+### 其他
+- 通道在线传感器 unique_id 修复;snapkey 操作后实体刷新;SetProperties 枚举值对齐;
+  测试扩展至 66 例(usagePeriod/位掩码…)。
+
 ## [1.3.0] - 2026-09-03
 
 ### 新增(移植自社区分支持续改进,基于客户端私有云 API)

@@ -95,6 +95,9 @@
       },
       "snapkey_count": {
         "name": "临时密码数量"
+      },
+      "latest_alarm": {
+        "name": "最新告警"
       }
     },
     "binary_sensor": {

@@ -247,41 +247,39 @@ async def async_set_voice_reply(call: ServiceCall):
 
 
 async def async_create_snapkey(call: ServiceCall):
-    """生成临时密码 (CreateDeviceSnapkey) -> 事件带 key."""
+    """生成临时密码:抓包验证的云消息 API (设备休眠也可用)."""
     hass, device_id = call.hass, call.data["device_id"]
     coordinator = _get_coordinator(hass, device_id)
     if not coordinator:
         raise HomeAssistantError(f"Device {device_id} not found")
-    result = await coordinator.api.async_set_service(
-        coordinator.device_id,
-        coordinator.product_id,
-        "CreateDeviceSnapkey",
-        {
-            "name": call.data["name"],
-            "effectTimes": call.data["effect_times"],
-            "number": call.data["number"],
-            "effectPeriod": call.data["effect_period"],
-        },
-    )
-    coordinator.set_snapkey_result(result or {})
+    config = {
+        "name": call.data["name"],
+        "effective_num": call.data["number"],
+        "effective_day": call.data["effect_times"],
+        "weekday_mode": "Every day",
+        "begin_time": "00:00:00",
+        "end_time": "23:59:59",
+    }
+    if call.data.get("effect_period"):
+        # 兼容旧参数:星期/时间段由 effect_period 推断(未归一时按默认每天处理)
+        _LOGGER.debug("effect_period provided, using default weekday mapping")
+    result = await coordinator.async_create_snapkey_cloud(config)
+    coordinator.set_snapkey_result(result)
     _fire_event(hass, "snapkey_created", device_id, result=result)
     await coordinator.async_request_refresh()
 
 
 async def async_get_snapkey_list(call: ServiceCall):
-    """获取临时密码列表 (GetDeviceSnapkeys) -> 事件."""
+    """获取临时密码分组列表 (iot.message.SmartLockSecretListV2, 设备休眠可用)."""
     hass, device_id = call.hass, call.data["device_id"]
     coordinator = _get_coordinator(hass, device_id)
     if not coordinator:
         raise HomeAssistantError(f"Device {device_id} not found")
-    result = await coordinator.api.async_set_service(
-        coordinator.device_id,
-        coordinator.product_id,
-        "GetDeviceSnapkeys",
-        {"offset": call.data["offset"], "count": call.data["count"]},
+    result = await coordinator.api.async_smart_lock_secret_list(
+        coordinator.device_id, coordinator.product_id, types=3
     )
     if isinstance(result, dict):
-        coordinator.set_snapkey_list(result.get("keys") or [])
+        coordinator.set_snapkey_list(result.get("secretGroups") or [])
     _fire_event(hass, "snapkey_list", device_id, result=result)
     await coordinator.async_request_refresh()
 

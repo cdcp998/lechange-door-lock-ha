@@ -37,7 +37,13 @@ from .const import (
     PROP_CHANNEL_NAMES,
 )
 from .imou_client import ImouAPIError, ImouClient
-from .state_utils import build_snapkey_periods, derive_lock_state, extract_batteries, normalize_wifi
+from .state_utils import (
+    build_snapkey_periods,
+    build_usage_period,
+    derive_lock_state,
+    extract_batteries,
+    normalize_wifi,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -66,6 +72,8 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         )
 
         self._seen_lock_notes: set[str] = set()
+        self._seen_alarm_ids: set[int] = set()
+        self._alarm_seen_initialized = False
         self._device_info_update_unsub = None
 
         # 临时密码(实体化配置):从 entry.options 恢复
@@ -109,12 +117,16 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         return self.entry.data.get(CONF_DEVICE_NAME) or self.entry.title
 
     async def async_get_device_snapshot(self) -> Optional[dict]:
-        """Find this device's entry inside the account device list."""
-        devices = await self.api.async_get_devices()
-        for dev in devices:
-            if dev["deviceId"] == self.device_id:
-                return dev
-        return None
+        """Fetch this device's full info (device.info.BasicInfoGet) with fallback."""
+        try:
+            return await self.api.async_get_device_info(self.device_id, self.product_id)
+        except ImouAPIError as err:
+            _LOGGER.debug("BasicInfoGet failed (%s), falling back to device list", err)
+            devices = await self.api.async_get_devices()
+            for dev in devices:
+                if dev["deviceId"] == self.device_id:
+                    return dev
+            return None
 
     async def _async_update_data(self) -> dict:
         """Fetch device status + all IoT properties."""
@@ -181,6 +193,19 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             data["channel_names"] = {}
 
+        # ---- 云侧告警(设备休眠也可用,抓包验证) ---------------------------
+        try:
+            alarm_data = await self.api.async_get_alarm_messages(
+                self.device_id, self.product_id, self.channel_id
+            )
+            alarms = alarm_data.get("alarms") or []
+            if isinstance(alarms, list):
+                data["alarms"] = [a for a in alarms if isinstance(a, dict)][-20:]
+                data["latest_alarm"] = data["alarms"][-1] if data["alarms"] else None
+                self._fire_new_alarms(data["alarms"])
+        except ImouAPIError as err:
+            _LOGGER.debug("Alarm messages unavailable: %s", err)
+
         _LOGGER.debug("Coordinator data updated: %s", data)
         return data
 
@@ -211,6 +236,26 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             record["device_id"] = self.device_id
             self.hass.bus.async_fire(
                 EVENT_PREFIX, {"type": "open_record", "record": record}
+            )
+
+    def _fire_new_alarms(self, alarms: list) -> None:
+        """Fire an event for each newly seen cloud alarm (backlog suppressed)."""
+        new_ids = {a.get("alarmId") for a in alarms}
+        new_ids.discard(None)
+        if not self._alarm_seen_initialized:
+            # 首次轮询只建立基线,不触发历史告警
+            self._seen_alarm_ids = set(new_ids)
+            self._alarm_seen_initialized = True
+            return
+        for alarm in alarms:
+            alarm_id = alarm.get("alarmId")
+            if alarm_id is None or alarm_id in self._seen_alarm_ids:
+                continue
+            self._seen_alarm_ids.add(alarm_id)
+            payload = dict(alarm)
+            payload["device_id"] = self.device_id
+            self.hass.bus.async_fire(
+                EVENT_PREFIX, {"type": "alarm", "alarm": payload}
             )
 
     # -------------------------------------------------------- 临时密码配置
@@ -263,6 +308,39 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
     def set_snapkey_list(self, keys: list) -> None:
         """Remember the last fetched temporary-password list."""
         self.snapkey_list = list(keys) if isinstance(keys, list) else []
+
+    async def async_create_snapkey_cloud(self, config: Optional[dict] = None) -> dict:
+        """按抓包验证的云消息 API 生成临时密码 (设备休眠也可用).
+
+        tempKey/keyId 由客户端生成(与 App 一致);成功后返回
+        {"name", "key": tempKey, "usagePeriod": ...} 供结果展示。
+        """
+        import random as _random
+
+        config = config or self.snapkey_config
+        temp_key = f"{_random.randint(0, 99999999):08d}"
+        key_id = _random.randint(10000000, 999999999)
+        usage_period = build_usage_period(
+            str(config.get("weekday_mode", "Every day")),
+            int(config.get("effective_day", 1)),
+        )
+        result = await self.api.async_smart_lock_secret_add(
+            self.device_id,
+            self.product_id,
+            temp_key,
+            name=str(config.get("name", "Home Assistant")),
+            number=int(config.get("effective_num", -1)),
+            effect_days=int(config.get("effective_day", 1)),
+            usage_period=usage_period,
+            key_id=key_id,
+        )
+        return {
+            "name": config.get("name", ""),
+            "key": temp_key,
+            "key_id": key_id,
+            "usage_period": usage_period,
+            "raw": result,
+        }
 
     @property
     def is_locked(self) -> Optional[bool]:
