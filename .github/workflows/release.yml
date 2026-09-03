@@ -32,9 +32,11 @@ jobs:
           tag = sys.argv[1]
           text = open("CHANGELOG.md", encoding="utf-8").read()
           blocks = text.split("\n## ")
+          # 兼容 [1.5.0] 与 [v1.5.0] 两种章节头
+          candidates = ("[" + tag + "]", "[v" + tag + "]")
           for block in blocks:
               header = block.split("\n", 1)[0].strip()
-              if header.startswith("[" + tag + "]"):
+              if header.startswith(candidates):
                   print("## " + block.strip(), end="")
                   break
           else:
