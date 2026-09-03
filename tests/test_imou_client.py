@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import ssl
+import uuid
 from datetime import datetime
 
 import pytest
@@ -148,11 +149,12 @@ class TestHttpPostAndErrors:
         assert data == {"deviceList": []}
 
     async def test_business_error_raised(self):
-        session = FakeSession({"device.list.BasicList": lambda: _resp({"code": 12002, "desc": ""})})
+        # 13924 = 业务参数/数据错误(非认证类,不触发重登)
+        session = FakeSession({"device.list.BasicList": lambda: _resp({"code": 13924, "desc": ""})})
         client = self._client(session)
         with pytest.raises(ImouAPIError) as err:
             await client.async_post("device.list.BasicList", {})
-        assert err.value.code == 12002
+        assert err.value.code == 13924
 
     async def test_http_error_raised(self):
         session = FakeSession({"device.list.BasicList": lambda: _resp({"code": 0}, status=500)})
@@ -200,7 +202,8 @@ class TestHttpPostAndErrors:
         def basic():
             basic_calls["n"] += 1
             if basic_calls["n"] == 1:
-                return _resp({"code": 11010, "data": {}})  # session expired
+                # 12002 = token 被作废(2026-09-03 实验:同账号新登录作废旧 token)
+                return _resp({"code": 12002, "data": {}})
             return _resp({"code": 10000, "data": {"deviceList": [{"deviceId": "SN1"}]}})
 
         session = FakeSession(
@@ -214,7 +217,8 @@ class TestHttpPostAndErrors:
         client = self._client(session)
         devices = await client.async_get_devices()
         assert devices[0]["deviceId"] == "SN1"
-        assert session.calls.count("user.account.GetToken") == 1
+        # 12002(token 作废)触发重登:QueryV2 一次 + BasicList 一次,各重登一回
+        assert session.calls.count("user.account.GetToken") == 2
         assert basic_calls["n"] == 2
         assert client.session_id == "S-fresh"
         assert client.internal_username == "lc1n_internal"
@@ -435,3 +439,228 @@ class TestGetDevicesNormalization:
         assert IC.is_lock(
             {"catalog": "Camera", "channels": [{"functions": ["talk"]}]}
         ) is False
+
+
+# ------------------------------------------------- ref encoding (线上协议)
+def _model_raw() -> dict:
+    """带服务/属性的匿名化模型(remoteOpenDoor ref=26600 等)."""
+    return {
+        "properties": [
+            {"identifier": "openDoorCombined", "ref": "106400",
+             "dataType": {"type": "bool", "specs": {}}},
+            {"identifier": "sdl_indoorOpenMode", "ref": "171700",
+             "dataType": {"type": "enum", "specs": {"list": [
+                 {"value": "1", "desc": "普通开门模式"},
+                 {"value": "2", "desc": "童锁模式"}]}}},
+            {"identifier": "sdl_openDoorKey", "ref": "166300",
+             "dataType": {"type": "struct", "specs": [
+                 {"identifier": "key", "ref": "166301",
+                  "dataType": {"type": "text", "specs": {}}},
+                 {"identifier": "callID", "ref": "166302",
+                  "dataType": {"type": "text", "specs": {}}}]},
+             "accessMode": "w"},
+        ],
+        "services": [
+            {"identifier": "remoteOpenDoor", "ref": "26600",
+             "name": "远程开门", "inputData": [], "outputData": []},
+            {"identifier": "CallAnswer", "ref": "27100",
+             "name": "呼叫接听",
+             "inputData": [{"identifier": "userInfo", "ref": "27101",
+                            "dataType": {"type": "text", "specs": {}}}],
+             "outputData": []},
+            {"identifier": "SetVoiceReply", "ref": "27400",
+             "name": "设置语音答复",
+             "inputData": [{"identifier": "index", "ref": "27401",
+                            "dataType": {"type": "int", "specs": {}}},
+                           {"identifier": "relateType", "ref": "27402",
+                            "dataType": {"type": "enum", "specs": {}}}],
+             "outputData": []},
+        ],
+    }
+
+
+class TestRefEncoding:
+    """iot.control 写路径的 ref 编码(2026-09-03 线上实测协议)."""
+
+    def _model(self):
+        return ic.ModelInfo(_model_raw())
+
+    def test_service_ref(self):
+        model = self._model()
+        assert model.service_ref("remoteOpenDoor") == "26600"
+        # 未知服务回退原值
+        assert model.service_ref("customSvc") == "customSvc"
+
+    def test_encode_service_input(self):
+        model = self._model()
+        assert model.encode_service_input("remoteOpenDoor", {}) == {}
+        assert model.encode_service_input("CallAnswer", {"userInfo": "u"}) == {
+            "27101": "u"
+        }
+        # int/enum 原样
+        assert model.encode_service_input(
+            "SetVoiceReply", {"index": 1, "relateType": 2}) == {"27401": 1, "27402": 2}
+
+    def test_encode_properties(self):
+        model = self._model()
+        assert model.encode_properties({"openDoorCombined": True}) == {"106400": 1}
+        assert model.encode_properties({"openDoorCombined": False}) == {"106400": 0}
+        # enum 原样
+        assert model.encode_properties({"sdl_indoorOpenMode": "2"}) == {"171700": "2"}
+        # struct 递归 ref 键
+        assert model.encode_properties(
+            {"sdl_openDoorKey": {"key": "k1", "callID": "c1"}}
+        ) == {"166300": {"166301": "k1", "166302": "c1"}}
+        # 未知键原样回退
+        assert model.encode_properties({"unknown": 3}) == {"unknown": 3}
+
+    async def test_set_service_payload_uses_ref(self):
+        """async_set_service 发送的 body: service=ref、键=ref、authInfo->client."""
+        session = FakeSession(
+            {
+                "iot.manager.QueryModelInfo": lambda: _resp(
+                    {"code": 10000, "data": {"modelJson": _model_raw()}}
+                ),
+                "iot.control.SetService": lambda: _resp(
+                    {"code": 10000, "data": {"outputData": {}, "channelId": 0}}
+                ),
+            }
+        )
+        client = ImouClient(
+            session, session_id="s", token="t", internal_username="u",
+            api_host="https://gw.example.com",
+        )
+        await client.async_set_service(
+            "SN1", "SKG8J5R0", "CallAnswer", {"userInfo": "u1"},
+            channel_id="0", auth_info="A1",
+        )
+        api, kwargs = session.calls_full[-1]
+        assert api == "iot.control.SetService"
+        body = json.loads(kwargs["data"].decode())
+        assert body["data"]["service"] == "27100"
+        assert body["data"]["inputData"] == {"27101": "u1"}
+        assert body["data"]["client"] == {"authId": "A1"}
+        assert "serviceName" not in body["data"]
+        assert "authInfo" not in body["data"]
+
+    async def test_set_properties_payload_uses_ref(self):
+        session = FakeSession(
+            {
+                "iot.manager.QueryModelInfo": lambda: _resp(
+                    {"code": 10000, "data": {"modelJson": _model_raw()}}
+                ),
+                "iot.control.SetProperties": lambda: _resp({"code": 10000, "data": {}}),
+            }
+        )
+        client = ImouClient(
+            session, session_id="s", token="t", internal_username="u",
+            api_host="https://gw.example.com",
+        )
+        await client.async_set_properties(
+            "SN1", "SKG8J5R0", {"openDoorCombined": True}, channel_id="0"
+        )
+        api, kwargs = session.calls_full[-1]
+        assert api == "iot.control.SetProperties"
+        body = json.loads(kwargs["data"].decode())
+        assert body["data"]["properties"] == {"106400": 1}
+
+    async def test_switch_payload_roundtrip_bool(self):
+        """bool 属性经 encode->decode 往返保持布尔语义."""
+        model = self._model()
+        encoded = model.encode_properties({"openDoorCombined": True})
+        decoded = model.decode_properties(encoded)
+        assert decoded["openDoorCombined"] is True
+
+
+# ----------------------------------------------------------- client-ua (R17)
+class TestClientUA:
+    """client-ua 终端特征:真机 Android 对齐(接口测试报告 R17)."""
+
+    @staticmethod
+    def _decode(ua: str) -> dict:
+        return json.loads(base64.b64decode(ua.encode()).decode())
+
+    def test_android_device_signature(self):
+        """clientType=android + 真机型号/品牌(来自混合品牌特征池)."""
+        ua = self._decode(ic._build_client_ua("11111111-2222-3333-4444-555555555555"))
+        pool = {m for m, _b, _o in ic._DEVICE_POOL}
+        brand_of = {m: b for m, b, _o in ic._DEVICE_POOL}
+        assert ua["clientType"] == "android"
+        assert ua["clientOS"] == "android"
+        assert ua["terminalModel"] in pool
+        assert ua["terminalBrand"] == brand_of[ua["terminalModel"]]
+        assert ua["clientOV"].isdigit()
+        assert ua["darkMode"] in ("0", "1")
+        assert ua["appid"] == ic.APP_ID
+        assert ua["project"] == ic.PROJECT
+        assert ua["clientProtocolVersion"] == ic.PROTO_VER
+
+    def test_ua_stable_per_terminal(self):
+        """同一 terminal_id → UA 恒定(每请求漂移本身即是特征)."""
+        tid = "A1B2C3D4-0000-1111-2222-333344445555"
+        u1 = ic._build_client_ua(tid)
+        u2 = ic._build_client_ua(tid)
+        assert u1 == u2
+
+    def test_ua_diversifies_across_terminals(self):
+        """不同 terminal_id → 分散到多机型(避免单一特征被聚类标记)."""
+        models = {
+            self._decode(ic._build_client_ua(str(uuid.UUID(int=i))) )["terminalModel"]
+            for i in range(200)
+        }
+        assert len(models) >= 5  # 池 ≥18 机型, 200 个终端必命中多款
+
+    def test_terminal_id_derived_to_16hex(self):
+        """UA 内 terminalId = 真机 android_id 格式(16hex 小写, DEX s7/k#g)。
+
+        持久化层 terminal_id 保持 UUID(兼容旧装), UA 内确定性派生 16hex,
+        同一 terminal_id → 同一 16hex(平滑迁移), 16hex 输入原样透传。
+        """
+        tid = "A1B2C3D4-0000-1111-2222-333344445555"
+        ua = self._decode(ic._build_client_ua(tid))
+        assert ua["terminalId"] == ic._real_android_id(tid)
+        assert len(ua["terminalId"]) == 16
+        assert all(c in "0123456789abcdef" for c in ua["terminalId"])
+        # 同输入恒定
+        assert ic._real_android_id(tid) == ic._real_android_id(tid)
+        # 16hex 原样透传
+        assert ic._real_android_id("18ee5ef24011a454") == "18ee5ef24011a454"
+
+    def test_ua_carries_ttid(self):
+        """真机 UA 带 ttid(首装 UUID 持久化, DEX util/c#d): 8-4-4-4-12 恒定."""
+        tid = "A1B2C3D4-0000-1111-2222-333344445555"
+        ua = self._decode(ic._build_client_ua(tid))
+        ttid = ua.get("ttid", "")
+        parts = ttid.split("-")
+        assert [len(p) for p in parts] == [8, 4, 4, 4, 12]
+        assert all(c in "0123456789abcdef" for c in ttid.replace("-", ""))
+        assert ttid == ic._real_ttid(tid)  # 稳定
+
+    def test_generated_terminal_id_is_uuid(self):
+        """未提供 terminalId 时持久化层自动生成标准 UUID(UA 内派生为 16hex)."""
+        ua1 = self._decode(ic._build_client_ua())
+        ua2 = self._decode(ic._build_client_ua())
+        # 每次调用会新生成 UUID → 派生 16hex 不同
+        assert ua1["terminalId"] != ua2["terminalId"]
+        for tid in (ua1["terminalId"], ua2["terminalId"]):
+            assert len(tid) == 16
+            assert all(c in "0123456789abcdef" for c in tid)
+
+    def test_client_terminal_id_is_uuid(self):
+        """ImouClient 无显式 terminalId 时生成 UUID 格式(旧 lechange-hass-* 弃用)."""
+        client = ImouClient(None)
+        assert len(client.terminal_id) == 36
+        assert not client.terminal_id.startswith("lechange-hass-")
+
+    def test_ua_participates_in_signature(self, monkeypatch):
+        """UA 变化 → 签名变化(签名串包含 x-pcs-client-ua)."""
+        _freeze_clock(monkeypatch)
+        body = b'{"data":{}}'
+        h1 = ic._sign_payload("POST", "/pcs/v1/x", body, "u", "k1", "k2")
+        monkeypatch.setattr(
+            ic, "_build_client_ua", lambda *a, **k: "OTHER_UA"
+        )
+        h2 = ic._sign_payload("POST", "/pcs/v1/x", body, "u", "k1", "k2")
+        assert h1["x-pcs-client-ua"] == "FIXED_UA"
+        assert h2["x-pcs-client-ua"] == "OTHER_UA"
+        assert h1["x-pcs-signature"] != h2["x-pcs-signature"]

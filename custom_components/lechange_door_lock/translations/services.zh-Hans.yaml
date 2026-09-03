@@ -161,3 +161,60 @@ call_service:
     channel_id:
       name: 通道
       description: 服务调用通道(可选)。
+
+doorfront_snapshot:
+  name: 门外截图
+  description: 云端取流抽帧获取门外画面(RTSV1;取流会唤醒电池设备,默认受节流限制,结果经 lechange_door_lock_event doorfront_snapshot 事件发出)。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    force:
+      name: 绕过节流
+      description: 为 true 时无视节流立即截图(耗电,慎用)。
+    channels:
+      name: 通道选择
+      description: 按次覆盖: '0+1' 双摄 / '0' 仅猫眼 / '1' 仅辅摄; 留空=用配置。
+    layout:
+      name: 布局
+      description: 按次覆盖: 'hstack' 左右 / 'vstack' 上下 / 'single' 单摄。
+    osd:
+      name: OSD
+      description: 按次覆盖: 'on' / 'off' 时间戳通道标签叠加。
+    filename:
+      name: 保存文件名
+      description: 相对 config/www/lechange_door_lock/ 的文件名(如 morning.jpg);留空不保存,仅发事件。
+
+alarm_image:
+  name: 告警图
+  description: 下载并解码最新(或指定)告警的抓拍图(DHAV→JPEG,使用安全码);结果经 lechange_door_lock_event alarm_image 事件发出。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    alarm_id:
+      name: 告警ID
+      description: 留空=取最新带图告警;填写 alarms 缓存中的 alarmId。
+    filename:
+      name: 保存文件名
+      description: 相对 config/www/lechange_door_lock/ 的文件名;留空不保存,仅发事件。
+
+record_preview:
+  name: 实时预览录制
+  description: 云端取流录制 N 秒实时预览(可选烧录 OSD 时间戳/通道名, HEVC 优先保持原编码);结果经 lechange_door_lock_event record_preview 事件发出(url/codec)。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    seconds:
+      name: 录制秒数
+      description: 0=用配置时长(默认 10s);上限 60s。
+    osd:
+      name: OSD
+      description: 'on'=烧录时间戳+通道名, 'off'=不带叠加; 留空=用配置(默认开)。
+    channel_id:
+      name: 通道
+      description: '0' 主摄像头(默认) / '1' 辅摄像头。
+    filename:
+      name: 保存文件名
+      description: 相对 config/www/lechange_door_lock/ 的文件名(如 preview.h264)。

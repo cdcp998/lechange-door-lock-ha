@@ -21,6 +21,9 @@ from .const import (
     SERVICE_CALL_HANGUP,
     SERVICE_CALL_REFUSE,
     SERVICE_CALL_SERVICE,
+    SERVICE_DOORFRONT_SNAPSHOT,
+    SERVICE_ALARM_IMAGE,
+    SERVICE_RECORD_PREVIEW,
     SERVICE_GENERATE_SNAPKEY,
     SERVICE_DELETE_SNAPKEY,
     SERVICE_GET_OPEN_DOOR_RECORD,
@@ -140,6 +143,38 @@ SET_PROPERTIES_SCHEMA = vol.Schema(
     }
 )
 
+DOORFRONT_SNAPSHOT_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): cv.string,
+        vol.Optional("force", default=False): cv.boolean,  # 绕过节流(谨慎: 唤醒耗电)
+        vol.Optional("filename", default=""): cv.string,   # 相对 www 的路径; 空=仅事件
+        # 本地选择(按次覆盖, 不持久化; 留空=用配置/实体的当前选择)
+        vol.Optional("channels", default=""): cv.string,   # '0+1' / '0' / '1'
+        vol.Optional("layout", default=""): cv.string,     # 'hstack' / 'vstack' / 'single'
+        vol.Optional("osd", default=""): cv.string,        # 'on' / 'off'
+    }
+)
+
+ALARM_IMAGE_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): cv.string,
+        vol.Optional("alarm_id", default=""): cv.string,  # 空=取最新告警
+        vol.Optional("filename", default=""): cv.string,
+    }
+)
+
+RECORD_PREVIEW_SCHEMA = vol.Schema(
+    {
+        vol.Required("device_id"): cv.string,
+        vol.Optional("seconds", default=0): vol.All(
+            vol.Coerce(int), vol.Range(min=0, max=60)
+        ),   # 0=用配置时长
+        vol.Optional("osd", default=""): cv.string,      # 'on'/'off'; 空=用配置
+        vol.Optional("channel_id", default="0"): cv.string,
+        vol.Optional("filename", default=""): cv.string, # 相对 www(如 preview.h264)
+    }
+)
+
 CALL_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Required("device_id"): cv.string,
@@ -165,14 +200,23 @@ def _fire_event(hass: HomeAssistant, event_type: str, device_id: str, **extra) -
 
 
 async def async_open_door_remote(call: ServiceCall):
-    """远程开门: iot.control.SetService remoteOpenDoor."""
+    """远程开门: iot.control.SetService remoteOpenDoor (MQTT 优先, 云 API 兜底)."""
     hass, device_id = call.hass, call.data["device_id"]
     coordinator = _get_coordinator(hass, device_id)
     if not coordinator:
         raise HomeAssistantError(f"Device {device_id} not found")
-    result = await coordinator.api.async_set_service(
-        coordinator.device_id, coordinator.product_id, "remoteOpenDoor", {}
+    # ref 编码 payload(与 async_set_service 同源), 供 MQTT/云统一控制
+    model = await coordinator.api.async_get_model(
+        coordinator.device_id, coordinator.product_id
     )
+    payload = {
+        "deviceId": coordinator.device_id,
+        "productId": coordinator.product_id,
+        "channelId": "0",
+        "service": model.service_ref("remoteOpenDoor"),
+        "inputData": model.encode_service_input("remoteOpenDoor", {}),
+    }
+    result = await coordinator.async_iot_control("iot.control.SetService", payload)
     _fire_event(hass, "open_door", device_id, result=result)
     await coordinator.async_request_refresh()
 
@@ -414,6 +458,182 @@ async def async_call_service(call: ServiceCall):
     )
 
 
+# ------------------------------------------------------------- 媒体 (WI-005)
+def _save_www_image(hass: HomeAssistant, filename: str, data: bytes) -> str | None:
+    """保存图片到 <config>/www/lechange_door_lock/, 返回 /local/ URL;失败返回 None。"""
+    import os
+
+    safe = os.path.basename(filename.strip().replace("\\", "/")) or ""
+    if not safe:
+        return None
+    if not safe.lower().endswith(".jpg"):
+        safe += ".jpg"
+    www_dir = hass.config.path("www", "lechange_door_lock")
+    try:
+        os.makedirs(www_dir, exist_ok=True)
+        path = os.path.join(www_dir, safe)
+        with open(path, "wb") as f:
+            f.write(data)
+        return f"/local/lechange_door_lock/{safe}"
+    except OSError as err:
+        _LOGGER.warning("保存图片到 www 失败: %s", err)
+        return None
+
+
+def _save_www_file(hass: HomeAssistant, filename: str, data: bytes) -> str | None:
+    """保存任意文件(预览视频 h264/h265)到 www, 返回 /local/ URL。"""
+    import os
+
+    safe = os.path.basename(filename.strip().replace("\\", "/")) or ""
+    if not safe:
+        return None
+    www_dir = hass.config.path("www", "lechange_door_lock")
+    try:
+        os.makedirs(www_dir, exist_ok=True)
+        path = os.path.join(www_dir, safe)
+        with open(path, "wb") as f:
+            f.write(data)
+        return f"/local/lechange_door_lock/{safe}"
+    except OSError as err:
+        _LOGGER.warning("保存预览到 www 失败: %s", err)
+        return None
+
+
+async def async_doorfront_snapshot(call: ServiceCall):
+    """门外截图: 云端 RTSV1 取流抽帧(节流; force 绕过, 电池设备慎用).
+
+    支持按次本地选择 channels/layout/osd(覆盖配置, 不持久化)。
+    """
+    hass, device_id = call.hass, call.data["device_id"]
+    coordinator = _get_coordinator(hass, device_id)
+    if not coordinator:
+        raise HomeAssistantError(f"Device {device_id} not found")
+    media = coordinator.media
+    # 按次覆盖(仅本次调用生效)
+    overrides = {}
+    ch = str(call.data.get("channels") or "").strip()
+    if ch:
+        overrides["channels"] = [c.strip() for c in ch.split("+") if c.strip()]
+    layout = str(call.data.get("layout") or "").strip()
+    if layout:
+        overrides["layout"] = layout
+    osd = str(call.data.get("osd") or "").strip().lower()
+    if osd in ("on", "off"):
+        overrides["osd"] = osd == "on"
+
+    jpeg = await media.async_cloud_snapshot(
+        force=bool(call.data["force"]),
+        want_channels=overrides.get("channels"),
+        want_layout=overrides.get("layout"),
+        want_osd=overrides.get("osd"),
+    )
+    if not jpeg:
+        raise HomeAssistantError(
+            "门外截图失败: 设备可能休眠/未配置安全码/ffmpeg 不可用(详见日志)"
+        )
+    url = None
+    if call.data.get("filename"):
+        url = await hass.async_add_executor_job(
+            _save_www_image, hass, call.data["filename"], jpeg
+        )
+    _fire_event(
+        hass,
+        "doorfront_snapshot",
+        device_id,
+        size=len(jpeg),
+        url=url,
+        channels=call.data.get("channels", ""),
+        layout=call.data.get("layout", ""),
+    )
+
+
+async def async_record_preview_service(call: ServiceCall):
+    """实时预览录制: 取流 N 秒 → 可选 OSD 烧录 → 保存并触发事件."""
+    hass, device_id = call.hass, call.data["device_id"]
+    coordinator = _get_coordinator(hass, device_id)
+    if not coordinator:
+        raise HomeAssistantError(f"Device {device_id} not found")
+    seconds = int(call.data.get("seconds") or 0) or None
+    osd = str(call.data.get("osd") or "").strip().lower()
+    with_osd = osd == "on" if osd in ("on", "off") else None
+    video, codec = await coordinator.media.async_record_preview(
+        seconds=seconds, with_osd=with_osd, channel_id=call.data.get("channel_id", "0")
+    )
+    if not video:
+        raise HomeAssistantError("实时预览失败: 设备可能休眠/未配置安全码(详见日志)")
+    url = None
+    ext = "h265" if codec == "h265" else "h264"
+    filename = call.data.get("filename") or f"preview_{ext}"
+    url = await hass.async_add_executor_job(
+        _save_www_file, hass, filename, video
+    )
+    _fire_event(
+        hass,
+        "record_preview",
+        device_id,
+        size=len(video),
+        codec=codec,
+        url=url,
+        osd=with_osd,
+    )
+
+
+async def async_alarm_image(call: ServiceCall):
+    """告警图: 下载最新(或指定)告警抓拍并解码(DHAV→JPEG, 安全码)."""
+    hass, device_id = call.hass, call.data["device_id"]
+    coordinator = _get_coordinator(hass, device_id)
+    if not coordinator:
+        raise HomeAssistantError(f"Device {device_id} not found")
+
+    alarm_id = str(call.data.get("alarm_id") or "").strip()
+    alarms = (coordinator.data or {}).get("alarms") or []
+    alarm = None
+    if alarm_id:
+        alarm = next(
+            (a for a in alarms if str(a.get("alarmId")) == alarm_id), None
+        )
+        if alarm is None:
+            raise HomeAssistantError(f"告警 {alarm_id} 不在当前缓存(先刷新或检查 ID)")
+    else:
+        for a in reversed(alarms):
+            if a.get("picUrl"):
+                alarm = a
+                break
+    if not alarm or not alarm.get("picUrl"):
+        raise HomeAssistantError("当前告警缓存中没有带抓拍图的告警")
+
+    def _pick_pic_url(a: dict) -> str:
+        """安全提取告警图 URL: 字符串直用 / list 取首 / dict 取 picUrl 键。"""
+        v = a.get("picUrl") or a.get("pic_url") or a.get("thumbUrl") or ""
+        if isinstance(v, str):
+            return v
+        if isinstance(v, list) and v:
+            first = v[0]
+            return first if isinstance(first, str) else ""
+        if isinstance(v, dict):
+            inner = v.get("picUrl") or v.get("url") or ""
+            return inner if isinstance(inner, str) else ""
+        return ""
+
+    jpeg = await coordinator.media.async_alarm_jpeg(_pick_pic_url(alarm))
+    if not jpeg:
+        raise HomeAssistantError("告警图下载/解码失败(检查安全码配置, 详见日志)")
+    url = None
+    if call.data.get("filename"):
+        url = await hass.async_add_executor_job(
+            _save_www_image, hass, call.data["filename"] or f"alarm_{alarm.get('alarmId')}", jpeg
+        )
+    _fire_event(
+        hass,
+        "alarm_image",
+        device_id,
+        alarm_id=alarm.get("alarmId"),
+        time=alarm.get("time"),
+        title=alarm.get("title"),
+        url=url,
+    )
+
+
 async def async_setup_services(hass: HomeAssistant) -> None:
     """Register LeChange services."""
     if hass.services.has_service(DOMAIN, SERVICE_OPEN_DOOR_REMOTE):
@@ -469,6 +689,21 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, SERVICE_CALL_SERVICE, async_call_service, schema=CALL_SERVICE_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DOORFRONT_SNAPSHOT,
+        async_doorfront_snapshot,
+        schema=DOORFRONT_SNAPSHOT_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_ALARM_IMAGE, async_alarm_image, schema=ALARM_IMAGE_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RECORD_PREVIEW,
+        async_record_preview_service,
+        schema=RECORD_PREVIEW_SCHEMA,
     )
 
     _LOGGER.debug("LeChange services registered")

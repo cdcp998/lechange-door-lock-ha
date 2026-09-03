@@ -41,6 +41,49 @@ CONF_RTSP_PASSWORD = "rtsp_password"
 CONF_RTSP_URL = "rtsp_url"            # 完整 URL 覆盖(如 go2rtc 中转地址)
 CONF_RTSP_SUBTYPE = "rtsp_subtype"    # 0 主码流 / 1 子码流
 
+# --- 设备密码体系(WI-008 两套密码: 同一 KDF 的两个代次) ----------------------
+# 安全码 = 设备标签出厂值(设备密码的出厂初始值) → 历史告警图解密(出厂代)
+CONF_SECURITY_CODE = "security_code"
+# 设备密码 = App"修改设备密码"后的当前值 → 实时流帧解密(当前代);
+# 未修改过设备密码时与安全码相同,留空则回退用安全码。
+CONF_DEVICE_PASSWORD = "device_password"
+
+# --- 本地通道地址接口(每通道可选局域网直连; 设备不在 LAN 时接口仍可用) --------
+# 值格式: 单通道可用 "host[:port]" 或完整 "rtsp://user:pass@host:port/...";
+# 组合通道用 URL 查询参数 ?channelId=N 选择, 或多行 "通道号=host[:port]"。
+# 为空 → 走云端 RTSV1 链路(节流+唤醒)。设备回网后此处即生效, 无需改配置。
+CONF_CHANNEL_HOSTS = "channel_hosts"          # JSON dict: {"0": "192.168.1.10:554", "1": "..."}
+
+# --- 云端媒体(RTSV1 / 快照节流) --------------------------------------------
+CONF_SNAPSHOT_MIN_INTERVAL = "snapshot_min_interval"  # 门外截图最小间隔(秒)
+DEFAULT_SNAPSHOT_MIN_INTERVAL = 60   # 电池设备: 默认 60s 节流(取流自带唤醒)
+CONF_SNAPSHOT_STREAM_ID = "snapshot_stream_id"        # 取流码流: '1'主(默认)/'2'子
+DEFAULT_SNAPSHOT_STREAM_ID = "1"     # ★ 仅主码流在中继有数据(WI-007), 子码流零包
+CONF_SNAPSHOT_OSD = "snapshot_osd"   # 门外截图 OSD(时间戳+通道名; 可关)
+DEFAULT_SNAPSHOT_OSD = True          # ★ 默认开; 用户可关
+CONF_SNAPSHOT_OSD_ALPHA = "snapshot_osd_alpha"        # OSD 底色不透明度 0-255
+DEFAULT_SNAPSHOT_OSD_ALPHA = 160     # ≈63% 黑, 半透明
+# --- 实时预览 OSD(录制/预览视频流烧录, 独立开关, 可设置不添加) --------------
+CONF_STREAM_PREVIEW_OSD = "stream_preview_osd"        # 实时预览 OSD 开关
+DEFAULT_STREAM_PREVIEW_OSD = True    # 默认开(时间戳+通道名烧录); 可关
+CONF_STREAM_PREVIEW_SECONDS = "stream_preview_seconds"  # 预览录制时长(秒)
+DEFAULT_STREAM_PREVIEW_SECONDS = 10
+CONF_SNAPSHOT_LAYOUT = "snapshot_layout"              # 多通道布局
+LAYOUT_HSTACK = "hstack"             # 左右(默认)
+LAYOUT_VSTACK = "vstack"             # 上下
+LAYOUT_SINGLE = "single"             # 单摄单图(配 CONF_SNAPSHOT_CHANNELS)
+DEFAULT_SNAPSHOT_LAYOUT = LAYOUT_HSTACK
+CONF_SNAPSHOT_CHANNELS = "snapshot_channels"          # 截取通道: '0+1'双摄 / '0'猫眼 / '1'辅摄
+CHANNELS_DUAL = "0+1"                # 双摄组合(默认)
+DEFAULT_SNAPSHOT_CHANNELS = CHANNELS_DUAL
+SNAPSHOT_CHANNEL_OPTIONS = (CHANNELS_DUAL, "0", "1")
+SNAPSHOT_LAYOUT_OPTIONS = (LAYOUT_HSTACK, LAYOUT_VSTACK, LAYOUT_SINGLE)
+MEDIA_APIVER = "191204"              # things.media.* 域(实测)
+MEDIA_STREAM_PAYLOAD_TYPES = {96, 98}  # RTP PT: 96=视频(DHAV)
+STREAM_CONNECT_TIMEOUT = 15
+STREAM_KEEPALIVE_INTERVAL = 8        # 中继 OPTIONS keepalive(实测 8-10s)
+STREAM_MAX_FRAME = 8 * 1024 * 1024
+
 # --- cloud api -----------------------------------------------------------
 API_ENTRY_HOST = "https://app-v2.imou.com"
 API_PREFIX = "/pcs/v1/"
@@ -65,6 +108,9 @@ SERVICE_GET_SNAPKEY_LIST = "get_snapkey_list"
 SERVICE_OPEN_DOOR_REMOTE = "open_door_remote"
 SERVICE_WAKE_UP_DEVICE = "wake_up_device"
 SERVICE_GET_OPEN_DOOR_RECORD = "get_open_door_record"
+SERVICE_DOORFRONT_SNAPSHOT = "doorfront_snapshot"   # 门外截图(云端取流抽帧)
+SERVICE_ALARM_IMAGE = "alarm_image"                 # 告警抓拍图下载+解码
+SERVICE_RECORD_PREVIEW = "record_preview"           # 实时预览录制(可选 OSD)
 SERVICE_CALL_ANSWER = "call_answer"
 SERVICE_CALL_REFUSE = "call_refuse"
 SERVICE_CALL_HANGUP = "call_hangup"
@@ -81,7 +127,10 @@ EVENT_PREFIX = f"{DOMAIN}_event"
 
 # --- error codes (App 内映射) ----------------------------------------------
 SUCCESS_CODES = {0, 200, 1000, 10000}
-AUTH_FAIL_CODES = {3, 13, 2027, 11010}     # 认证失败/登录态失效 → 重新登录
+# 认证失败/登录态失效 → 重新登录。12002 = 签名密钥/token 被作废(实测:同账号
+# 任意端 GetToken 新登录会作废旧 token,单 token 策略;2026-09-03 判别实验:
+# 错误密钥→12002,错误/缺失 sessionId→10000,故 12002 是"重登"的可靠信号)
+AUTH_FAIL_CODES = {3, 13, 2027, 11010, 12002}
 ACCOUNT_LOCKED_CODES = {2008, 100001, 22005}
 DEVICE_OFFLINE_CODES = {10003}             # 设备休眠/离线/不可达
 RATE_LIMIT_CODES = {2029, 2030}
@@ -92,7 +141,6 @@ PROP_LOCK_STATE = "doorLockState"        # 0 关 / 1 开 (门物理状态)
 PROP_POWER_STATE = "powerState"          # 0 正常 / 1 省电 / 2 超级省电
 PROP_TAMPER = "tamper"
 PROP_CHILD_LOCK = "child_lock"
-PROP_OPEN_DOOR_BY_TOUCH = "openDoorByTouch"
 PROP_OPEN_DOOR_MSG = "openDoorMsg"
 PROP_WIFI_DOOR_LOCK = "wifiDoorLock"     # struct {SSID, status, intensity...}
 PROP_SLEEP_STATUS = "sleepStatus"

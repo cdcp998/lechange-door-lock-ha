@@ -161,3 +161,60 @@ call_service:
     channel_id:
       name: Channel id
       description: Channel for the service call (optional).
+
+doorfront_snapshot:
+  name: Door-front snapshot
+  description: "Capture the door-front view via cloud stream (RTSV1). Wakes the battery device; throttled by default. Result is emitted via the lechange_door_lock_event doorfront_snapshot event."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    force:
+      name: Bypass throttle
+      description: "true: capture immediately ignoring the throttle (battery impact, use sparingly)."
+    channels:
+      name: Channels
+      description: "Per-call override: '0+1' dual / '0' door-eye only / '1' aux only; empty = configured."
+    layout:
+      name: Layout
+      description: "Per-call override: 'hstack' side-by-side / 'vstack' stacked / 'single' one camera."
+    osd:
+      name: OSD
+      description: "Per-call override: 'on' / 'off' timestamp & channel label overlay."
+    filename:
+      name: Filename
+      description: "File name under config/www/lechange_door_lock/ (e.g. morning.jpg); empty = event only."
+
+alarm_image:
+  name: Alarm image
+  description: "Download and decode the latest (or given) alarm snapshot (DHAV -> JPEG, uses the security code); result emitted via the alarm_image event."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    alarm_id:
+      name: Alarm ID
+      description: "Empty = latest alarm with a picture; or an alarmId from the cached alarms list."
+    filename:
+      name: Filename
+      description: "File name under config/www/lechange_door_lock/; empty = event only."
+
+record_preview:
+  name: Record live preview
+  description: "Record N seconds of live preview from the cloud stream (optional OSD timestamp/channel burned in; HEVC kept when available). Result emitted via the record_preview event (url/codec)."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    seconds:
+      name: Seconds
+      description: "0 = configured duration (default 10s); max 60s."
+    osd:
+      name: OSD
+      description: "'on' = burn timestamp + channel name, 'off' = clean; empty = config (default on)."
+    channel_id:
+      name: Channel
+      description: "0 = main camera (default) / 1 = auxiliary camera."
+    filename:
+      name: Filename
+      description: "File name under config/www/lechange_door_lock/ (e.g. preview.h264)."

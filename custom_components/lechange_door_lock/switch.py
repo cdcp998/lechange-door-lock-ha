@@ -1,4 +1,4 @@
-"""Switch platform: writable lock properties (童锁/呼叫转接/触屏开门)."""
+"""Switch platform: writable lock properties (童锁/呼叫转接)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from .const import (
     EVENT_PREFIX,
     PROP_CALL_TRANSFER,
     PROP_CHILD_LOCK,
-    PROP_OPEN_DOOR_BY_TOUCH,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,7 +24,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
     entities = [
         LeChangeChildLockSwitch(coordinator, device_id),
         LeChangeCallTransferSwitch(coordinator, device_id),
-        LeChangeOpenDoorByTouchSwitch(coordinator, device_id),
     ]
     async_add_entities(entities, True)
 
@@ -94,8 +92,3 @@ class LeChangeCallTransferSwitch(_BaseLeChangeSwitch):
         )
 
 
-class LeChangeOpenDoorByTouchSwitch(_BaseLeChangeSwitch):
-    """触屏开门开关 (openDoorByTouch)."""
-
-    def __init__(self, coordinator, device_id: str) -> None:
-        super().__init__(coordinator, device_id, "open_door_by_touch", PROP_OPEN_DOOR_BY_TOUCH)

@@ -25,9 +25,11 @@
       },
       "device": {
         "title": "Select Device",
-        "description": "Select the door lock device to add.",
+        "description": "Select the lock device and enter the device credential pair.\n\n**Security code**: the 8-character uppercase alphanumeric code printed next to the QR/barcode on the device label (battery compartment), also shown in App > Device settings > About, or on the box.\n\n**Device password**: the current password after changing it in the LeChange app; if never changed it equals the security code — **leave empty**.\n\nUsed for: alarm snapshot decryption (security code) and live-stream frame decryption (device password). Stored locally only.",
         "data": {
-          "device_id": "Device"
+          "device_id": "Device",
+          "security_code": "Security code (8 chars, device label)",
+          "device_password": "Device password (only if changed; empty = same as security code)"
         }
       }
     },
@@ -37,7 +39,8 @@
       "captcha_needed": "Anti-abuse / human verification (Geetest GT4) triggered. Complete one slider check in the **LeChange app** to unlock the account, then retry.",
       "no_devices": "No devices found under this account.",
       "network": "Network error, please retry later.",
-      "unknown": "Unexpected error."
+      "unknown": "Unexpected error.",
+      "security_code_invalid": "Security code should be 8 uppercase letters/digits (see device label)."
     },
     "abort": {
       "already_configured": "Device is already configured.",
@@ -47,15 +50,26 @@
   "options": {
     "step": {
       "init": {
-        "title": "Camera (video) options",
-        "description": "Configure the RTSP source of the lock camera. Defaults to the cloud stream gateway saved during setup; rtsp_url takes precedence, then rtsp_host (LAN), leaving both empty uses the cloud default.",
+        "title": "Media & connection options",
+        "description": "Door-front snapshots use cloud stream capture (main stream by default; dual cameras combined side-by-side).\nSnapshot and live preview OSD are ON by default (timestamp top-left + channel bottom-right); can be disabled. Stream requests wake the battery device — keep the interval at 60s or more.",
         "data": {
-          "rtsp_url": "Full RTSP/restream URL (optional)",
-          "rtsp_host": "LAN IP (empty = cloud stream gateway)",
+          "security_code": "Security code (empty = keep current)",
+          "device_password": "Device password (empty = keep / same as security code)",
+          "snapshot_min_interval": "Min snapshot interval (seconds, >=15)",
+          "rtsp_url": "Full RTSP/relay URL (optional)",
+          "rtsp_host": "LAN IP (empty = cloud only)",
           "rtsp_port": "RTSP port",
           "rtsp_username": "RTSP username",
           "rtsp_password": "RTSP password",
-          "rtsp_subtype": "Stream (0 main / 1 sub)"
+          "rtsp_subtype": "Stream (0 main / 1 sub)",
+          "snapshot_stream_id": "Stream (main by default)",
+          "snapshot_osd": "Snapshot OSD (default on: timestamp + channel name)",
+          "snapshot_osd_alpha": "OSD background opacity (0-255, 160 = ~63% translucent)",
+          "snapshot_layout": "Multi-channel layout (side-by-side / stacked / single)",
+          "snapshot_channel": "Channel for single-camera layout",
+          "channel_hosts": "Local channel addresses (one per line: channel=IP[:port]; used first when device is on LAN, empty = cloud)",
+          "stream_preview_osd": "Live preview OSD (default on; off = clean)",
+          "stream_preview_seconds": "Live preview duration (seconds, 3-60)"
         }
       }
     }
@@ -129,9 +143,6 @@
       "child_lock": {
         "name": "Child lock"
       },
-      "open_door_by_touch": {
-        "name": "Touch to open"
-      },
       "channel_online": {
         "name": "Channel {channel_id} online"
       }
@@ -185,9 +196,6 @@
       },
       "call_transfer": {
         "name": "Call transfer"
-      },
-      "open_door_by_touch": {
-        "name": "Touch to open"
       }
     },
     "camera": {

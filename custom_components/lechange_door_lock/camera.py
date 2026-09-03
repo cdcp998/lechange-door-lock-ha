@@ -1,16 +1,12 @@
-"""Camera platform (视频): doorbell channels with cloud gateway default.
+"""Camera platform (视频): 门外截图 + 云端预览。
 
-The lock's camera channels (主摄像头/辅摄像头) are reachable through the
-cloud stream gateway that the account provides (streamEntryAddrV3 /
-mediaConfig.streamUrl, e.g. nginxdeviceproxy-online-hz.imou.com:443).
+链路优先级:
+  1. rtsp_url / rtsp_host(局域网 Dahua CGI) — 用户显式覆盖时走传统路径
+  2. 云端 RTSV1 门外截图(WI-007 协议, media.py 节流): 电池设备默认路径,
+     取流请求自带唤醒 → 强制节流(默认 60s, options 可调), 区间内返回缓存帧
 
-Default behavior: the entity's stream URL is built from the cloud gateway
-unless the user overrides it in the integration options:
-  1. rtsp_url      - full URL override (e.g. go2rtc restream endpoint)
-  2. rtsp_host     - LAN address (rtsp://<user>:<pass>@<host>:554/...)
-  3. (default)     - cloud stream gateway stored at setup time
-
-Dahua RTSP URI: rtsp://<user>:<pass>@<host>:<port>/cam/realmonitor?channel=N&subtype=0|1
+云端链路无法输出 RTSP URL(HA stream 组件需要), 故仅在配置了
+rtsp 覆盖时声明 CameraEntityFeature.STREAM; 纯云端时前端按快照轮询。
 """
 
 from __future__ import annotations
@@ -68,7 +64,7 @@ class LeChangeCameraEntity(CoordinatorEntity, Camera):
 
     _attr_has_entity_name = True
     _attr_translation_key = "camera"
-    _attr_supported_features = CameraEntityFeature.STREAM
+    _attr_supported_features = CameraEntityFeature(0)
 
     def __init__(self, coordinator, device_id: str, channel_id: str) -> None:
         super().__init__(coordinator)
@@ -108,24 +104,35 @@ class LeChangeCameraEntity(CoordinatorEntity, Camera):
 
     @property
     def stream_source(self) -> str | None:
-        """Return the RTSP/restream source URL for this channel."""
+        """RTSP/restream URL(仅显式覆盖时; 纯云端走快照轮询)。"""
         opts = self._options
         url = str(opts.get(CONF_RTSP_URL) or "").strip()
         if url:
             return url.replace("{channel}", str(self._channel_id))
-        host, port = self._host_and_port()
+        host = str(opts.get(CONF_RTSP_HOST) or "").strip()
         if not host:
-            return None
+            return None  # 云端 RTSV1 无法映射为 HA stream 源
+        port = int(opts.get(CONF_RTSP_PORT, 554))
+        host, port = split_host_port(host, port)
         user = str(opts.get(CONF_RTSP_USERNAME, "admin")).strip()
         pw = str(opts.get(CONF_RTSP_PASSWORD, "")).strip()
         subtype = int(opts.get(CONF_RTSP_SUBTYPE, 0))
         return build_rtsp_url(host, port, user, pw, self._channel_id, subtype)
 
     @property
+    def supported_features(self) -> CameraEntityFeature:
+        """配置了 RTSP/中转源才支持 STREAM(供 HA stream 组件接管)。"""
+        if self.stream_source:
+            return CameraEntityFeature.STREAM
+        return CameraEntityFeature(0)
+
+    @property
     def extra_state_attributes(self) -> dict:
         attrs = {
             "channel_id": self._channel_id,
             "cloud_stream_entry": self.cloud_stream_entry,
+            "cloud_snapshot": self.coordinator.media.security_code != "",
+            "snapshot_min_interval": self.coordinator.media.snapshot_min_interval,
         }
         data = self.coordinator.data or {}
         ch_names = data.get("channel_names") or {}
@@ -145,11 +152,12 @@ class LeChangeCameraEntity(CoordinatorEntity, Camera):
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
-        """Snapshot via the Dahua CGI on the LAN (cloud gateway has no CGI).
-
-        拉取摄像头本身即唤醒锁体(门铃常在线);仅局域网 IPv4 时生效。
-        """
-        return await self.capture_image_via_options(self.coordinator, self._channel_id)
+        """门外截图: 局域网 CGI(如配置) → 云端 RTSV1 抽帧(节流)。"""
+        lan = await self.capture_image_via_options(self.coordinator, self._channel_id)
+        if lan:
+            return lan
+        # 云端链路(电池设备默认): 内部节流, 区间内返回缓存帧
+        return await self.coordinator.media.async_cloud_snapshot()
 
     @staticmethod
     async def capture_image_via_options(coordinator, channel_id: str) -> bytes | None:

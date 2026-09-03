@@ -10,6 +10,46 @@
 
 ---
 
+## [未发布]
+
+### ✨ 媒体接入 v1.5.0 (WI-005, 2026-09-04)
+- **云端实时预览**(`record_preview`): RTSV1 取流录制, 默认主码流, H265 优先;
+  支持 OSD(时间戳左上 + 通道名右下, 逐秒真实时间, 可关)。
+- **门外截图**: camera 快照 + `doorfront_snapshot` 服务; 双摄组合(左右/上下/单摄),
+  支持 OSD(默认开), 60s 节流。
+- **告警图**: `alarm_image` 服务; DAV 容器解密(安全码) → 原厂 JPEG。
+- **本地通道地址**: `channel_hosts`; LAN `snapshot.cgi` 优先, 设备不在网自动回退云端。
+- **两套密码**: 配置流采集安全码(必填)+设备密码(可选); 安全码=告警图, 设备密码=流帧。
+- **OSD 字体**: 插件内置思源黑体 SC(子集 3.4MB), 截图/预览同字体, 不依赖系统字库。
+- **UA 真机特征池**: 19 款混合品牌机型, 按 terminal_id 确定性派生。
+- **MQTT 实时通道**(WI-003): 凭据 `client_v2/auth/get`(apiver 6550) + TLS 8883
+  (内置 CA) + `iot_request/iot_response` 往返; **控制 MQTT 优先 → 云 API 兜底**,
+  属性推送实时更新实体; 断线自动重试, 不影响轮询。
+- **ffmpeg**: 系统二进制依赖, 无 imageio 回退。
+- 单测 135 例。
+
+### 修复(会话持续性,2026-09-03 决定性实验)
+- **12002 纳入自动重登码表**(`AUTH_FAIL_CODES`):实测服务端为**单 token 策略**——同账号
+  任意端 `GetToken` 新登录即作废旧 token(手机 App 登录会踢掉集成会话,反之亦然)。
+  此前 12002 不在失效码表内,会话被踢后集成持续空轮询不恢复;现收到 12002 自动重登,
+  与手机 App 共存改为"谁登录谁在线,后登者踢前者"的明确语义。
+- 单元测试更新:业务错误样例改用 13924(12002 现为认证失效语义);
+  重登行为断言 12002→GetToken→重试(2 次重登路径),83 例全通过。
+
+### 修复(终端特征迁移)
+- **client-ua 迁移为真机安卓特征**(接口测试报告 R17):`clientType=android` 保持,
+  `terminalModel/terminalBrand` 由 PC 占位值(HA-Integration-Box/Generic)改为真机值
+  (**SM-S921B/samsung**),`clientOV` 对齐 Android 14(34)——phone 型有真机校验(12112)
+  不可模拟,PC 特征终端会话待遇差、易频繁失效,真机安卓特征为可持续方案。
+- **terminalId 迁移为 App 同款标准 UUID**(大写带连字符):coordinator 启动时检测旧
+  `lechange-hass-*` 格式一次性升级并持久化,保持"一台终端一份 ID"语义(不膨胀终端管理列表)。
+- 单元测试新增 client-ua 终端特征组(83 例,含签名串参与性断言)。
+- 实测:`API/scripts/android_session_probe.py`(真机 UA 登录 + 30s 只读心跳,
+  user.account.Login / device.list.DeviceBasicInfoQueryV2 / cloud.message.GetDeviceAlarmMixMessage
+  三路全 10000;`loop` 模式统计会话存活时长,会话失效自动重登)。
+### Todo
+- **持久化登录状态** 即完成对设备mac的绑定授信操作.
+
 ## [1.4.0] - 2026-09-03
 
 ### 依据(新分析文件,仅存本地不公开)

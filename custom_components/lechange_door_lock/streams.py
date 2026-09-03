@@ -31,6 +31,21 @@ def is_lan_host(host: str) -> bool:
     return bool(_IP_RE.match(host.split(":")[0]))
 
 
+def build_snapshot_url(
+    host: str,
+    port: int,
+    username: str = "admin",
+    password: str = "",
+    channel_id: int | str = 0,
+    subtype: int = 0,
+) -> str:
+    """Dahua 局域网快照 CGI URL (仅 IPv4 LAN 适用)。"""
+    return (
+        f"http://{host}:{port}/cgi-bin/snapshot.cgi"
+        f"?channel={int(channel_id) + 1}&subtype={int(subtype)}"
+    )
+
+
 def build_rtsp_url(
     host: str,
     port: int,
@@ -58,3 +73,39 @@ def build_rtsp_url(
         f"rtsp://{cred}{host}:{port}/cam/realmonitor"
         f"?channel={ch}&subtype={int(subtype)}"
     )
+
+
+def parse_channel_hosts(raw: str | dict) -> dict[str, str]:
+    """解析通道地址配置 → {"0": "host[:port]", ...}。
+
+    支持两种格式(都存成 JSON dict 最稳, 此处兼容旧手填):
+      - JSON: '{"0": "192.168.1.10", "1": "192.168.1.11:554"}'
+      - 多行: '0=192.168.1.10\n1=192.168.1.11:554'
+    """
+    import json
+
+    out: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if str(k).strip() and str(v).strip():
+                out[str(k).strip()] = str(v).strip()
+        return out
+    text = (raw or "").strip()
+    if not text:
+        return out
+    if text[:1] in ("{", "["):
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                return parse_channel_hosts(obj)
+        except json.JSONDecodeError:
+            pass
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "=" not in line or line.startswith("#"):
+            continue
+        ch, _, addr = line.partition("=")
+        ch, addr = ch.strip(), addr.strip()
+        if ch and addr:
+            out[ch] = addr
+    return out

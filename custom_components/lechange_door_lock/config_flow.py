@@ -35,6 +35,25 @@ from .const import (
     CONF_RTSP_PASSWORD,
     CONF_RTSP_URL,
     CONF_RTSP_SUBTYPE,
+    CONF_SECURITY_CODE,
+    CONF_DEVICE_PASSWORD,
+    CONF_SNAPSHOT_MIN_INTERVAL,
+    CONF_SNAPSHOT_OSD,
+    CONF_SNAPSHOT_OSD_ALPHA,
+    CONF_SNAPSHOT_STREAM_ID,
+    CONF_SNAPSHOT_LAYOUT,
+    CONF_SNAPSHOT_CHANNELS,
+    CONF_CHANNEL_HOSTS,
+    CONF_STREAM_PREVIEW_OSD,
+    CONF_STREAM_PREVIEW_SECONDS,
+    DEFAULT_SNAPSHOT_MIN_INTERVAL,
+    DEFAULT_SNAPSHOT_OSD,
+    DEFAULT_SNAPSHOT_OSD_ALPHA,
+    DEFAULT_SNAPSHOT_STREAM_ID,
+    DEFAULT_SNAPSHOT_LAYOUT,
+    DEFAULT_SNAPSHOT_CHANNELS,
+    DEFAULT_STREAM_PREVIEW_OSD,
+    DEFAULT_STREAM_PREVIEW_SECONDS,
 )
 from .imou_client import ImouAPIError, ImouClient
 
@@ -204,6 +223,8 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_abort(reason="device_not_found")
             await self.async_set_unique_id(device_id)
             self._abort_if_unique_id_configured()
+            security_code = str(user_input.get(CONF_SECURITY_CODE, "")).strip()
+            device_password = str(user_input.get(CONF_DEVICE_PASSWORD, "")).strip()
             return self.async_create_entry(
                 title=device["name"],
                 data={
@@ -224,6 +245,11 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     CONF_LOCK_STATE: device.get("lockState", ""),
                     CONF_STREAM_ENTRY: device.get("stream_entry", ""),
+                    # 设备密码体系(WI-008 两套密码, 同一 KDF 两个代次):
+                    # 安全码=出厂代(告警图解密); 设备密码=当前代(流帧解密),
+                    # 未修改过设备密码时与安全码相同 → 留空回退用安全码。
+                    CONF_SECURITY_CODE: security_code,
+                    CONF_DEVICE_PASSWORD: device_password or security_code,
                 },
             )
 
@@ -231,7 +257,15 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             d["deviceId"]: f"{d['name']} ({d['deviceId']}){'' if ImouClient.is_lock(d) else ' ·非门锁'}"
             for d in self._devices
         }
-        schema = vol.Schema({vol.Required(CONF_DEVICE_ID): vol.In(devices_dict)})
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_DEVICE_ID): vol.In(devices_dict),
+                # 机身标签二维码/条码旁的 8 位大写字母数字串
+                vol.Required(CONF_SECURITY_CODE): cv.string,
+                # App"修改设备密码"后的当前值; 未改过则留空(=安全码)
+                vol.Optional(CONF_DEVICE_PASSWORD, default=""): cv.string,
+            }
+        )
         return self.async_show_form(step_id="device", data_schema=schema)
 
     @staticmethod
@@ -244,15 +278,84 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class LeChangeOptionsFlowHandler(config_entries.OptionsFlow):
-    """Options flow: RTSP/video settings."""
+    """Options flow: 设备密码体系 + 媒体/RTSP + 节流设置。"""
 
     def __init__(self, config_entry) -> None:
         self._entry = config_entry
 
     async def async_step_init(self, user_input: Optional[dict] = None) -> FlowResult:
         data = self._entry.options or {}
+        entry_data = self._entry.data or {}
         schema = vol.Schema(
             {
+                # --- 设备密码体系(两套密码 WI-008) ---
+                vol.Optional(
+                    CONF_SECURITY_CODE,
+                    description={"suggested_value": entry_data.get(CONF_SECURITY_CODE, "")},
+                ): cv.string,
+                vol.Optional(
+                    CONF_DEVICE_PASSWORD,
+                    description={"suggested_value": entry_data.get(CONF_DEVICE_PASSWORD, "")},
+                ): cv.string,
+                # --- 云端媒体节流(电池设备;取流请求自带唤醒) ---
+                vol.Optional(
+                    CONF_SNAPSHOT_MIN_INTERVAL,
+                    default=int(data.get(CONF_SNAPSHOT_MIN_INTERVAL, DEFAULT_SNAPSHOT_MIN_INTERVAL)),
+                ): vol.All(vol.Coerce(int), vol.Range(min=15, max=3600)),
+                # --- 码流偏好(默认主码流; 子码流中继无数据时自动回退主码流) ---
+                vol.Optional(
+                    CONF_SNAPSHOT_STREAM_ID,
+                    default=str(data.get(CONF_SNAPSHOT_STREAM_ID, DEFAULT_SNAPSHOT_STREAM_ID)),
+                ): vol.In({"1": "主码流(推荐)", "2": "子码流(实测中继无数据,自动回退)"}),
+                # --- OSD 叠加层(门外截图: 时间戳+通道名; 默认不添加=干净截图) ---
+                vol.Optional(
+                    CONF_SNAPSHOT_OSD,
+                    default=bool(data.get(CONF_SNAPSHOT_OSD, DEFAULT_SNAPSHOT_OSD)),
+                ): cv.boolean,
+                vol.Optional(
+                    CONF_SNAPSHOT_OSD_ALPHA,
+                    default=int(data.get(CONF_SNAPSHOT_OSD_ALPHA, DEFAULT_SNAPSHOT_OSD_ALPHA)),
+                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=255)),
+                # --- 实时预览 OSD(独立开关; 默认开, 可设置不添加) ---
+                vol.Optional(
+                    CONF_STREAM_PREVIEW_OSD,
+                    default=bool(
+                        data.get(CONF_STREAM_PREVIEW_OSD, DEFAULT_STREAM_PREVIEW_OSD)
+                    ),
+                ): cv.boolean,
+                vol.Optional(
+                    CONF_STREAM_PREVIEW_SECONDS,
+                    default=int(
+                        data.get(CONF_STREAM_PREVIEW_SECONDS, DEFAULT_STREAM_PREVIEW_SECONDS)
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=3, max=60)),
+                # --- 多通道布局(双摄组合: 左右/上下/单摄) ---
+                vol.Optional(
+                    CONF_SNAPSHOT_LAYOUT,
+                    default=str(data.get(CONF_SNAPSHOT_LAYOUT, DEFAULT_SNAPSHOT_LAYOUT)),
+                ): vol.In(
+                    {
+                        "hstack": "左右组合(双通道并列)",
+                        "vstack": "上下组合(双通道纵排)",
+                        "single": "单摄单图(按下方通道选择)",
+                    }
+                ),
+                vol.Optional(
+                    CONF_SNAPSHOT_CHANNELS,
+                    default=str(data.get(CONF_SNAPSHOT_CHANNELS, DEFAULT_SNAPSHOT_CHANNELS)),
+                ): vol.In(
+                    {
+                        "0+1": "双摄组合(通道0+1)",
+                        "0": "仅通道0 主摄像头(猫眼)",
+                        "1": "仅通道1 辅摄像头",
+                    }
+                ),
+                # --- 本地通道地址(可选; 每行 通道号=局域网地址, 设备在网时优先) ---
+                vol.Optional(
+                    CONF_CHANNEL_HOSTS,
+                    default=str(data.get(CONF_CHANNEL_HOSTS, "")),
+                ): cv.string,
+                # --- 局域网 RTSP(可选覆盖) ---
                 vol.Optional(CONF_RTSP_URL, default=data.get(CONF_RTSP_URL, "")): cv.string,
                 vol.Optional(CONF_RTSP_HOST, default=data.get(CONF_RTSP_HOST, "")): cv.string,
                 vol.Optional(CONF_RTSP_PORT, default=int(data.get(CONF_RTSP_PORT, 554))): int,
@@ -268,5 +371,10 @@ class LeChangeOptionsFlowHandler(config_entries.OptionsFlow):
             }
         )
         if user_input is not None:
+            # 选项流中的密码留空 → 不覆盖 entry.data 中已有值
+            if not str(user_input.get(CONF_SECURITY_CODE, "")).strip():
+                user_input.pop(CONF_SECURITY_CODE, None)
+            if not str(user_input.get(CONF_DEVICE_PASSWORD, "")).strip():
+                user_input.pop(CONF_DEVICE_PASSWORD, None)
             return self.async_create_entry(title="", data=user_input)
         return self.async_show_form(step_id="init", data_schema=schema)

@@ -1,12 +1,12 @@
 {
   "domain": "lechange_door_lock",
   "name": "LeChange Door Lock",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "icons": {
     "128": "icon.png"
   },
-  "requirements": [],
-  "dependencies": [],
+  "requirements": ["pycryptodome>=3.20.0"],
+  "dependencies": ["ffmpeg"],
   "codeowners": ["@cdcp998"],
   "config_flow": true,
   "iot_class": "cloud_polling",

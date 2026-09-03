@@ -53,6 +53,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 立即拉取一次型号/固件信息
     await coordinator.async_update_device_info()
 
+    # MQTT 实时通道(WI-003): 后台连接, 断线自动重试; 失败不影响轮询
+    await coordinator.async_start_mqtt()
+
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

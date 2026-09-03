@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import uuid
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -37,6 +39,8 @@ from .const import (
     PROP_CHANNEL_NAMES,
 )
 from .imou_client import ImouAPIError, ImouClient
+from .media import MediaManager
+from .mqtt import MqttManager
 from .state_utils import (
     build_snapkey_periods,
     build_usage_period,
@@ -61,11 +65,10 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
 
         client_session = async_get_clientsession(hass)
         # 独立终端标识:安装时生成一次并持久化(不与手机 App 同终端 → 不互相顶号)
+        # v1.4.1+:迁移为 App 同款标准 UUID(旧 lechange-hass-* 为 PC 时代格式)
         terminal_id = str((entry.options or {}).get("terminal_id", ""))
-        if not terminal_id:
-            import uuid as _uuid
-
-            terminal_id = "lechange-hass-" + _uuid.uuid4().hex[:16]
+        if not terminal_id or terminal_id.startswith("lechange-hass-"):
+            terminal_id = str(uuid.uuid4()).upper()
             hass.config_entries.async_update_entry(
                 entry, options={**(entry.options or {}), "terminal_id": terminal_id}
             )
@@ -79,6 +82,19 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             api_host=entry.data.get(CONF_API_HOST, ""),
             on_session_update=self._persist_session,
             terminal_id=terminal_id,
+        )
+
+        # 云端媒体管理(门外截图节流/缓存 + 告警图解码, 依赖安全码/设备密码)
+        self.media = MediaManager(self)
+
+        # MQTT 实时通道(WI-003): 状态推送 + 控制优先 MQTT, 云 API 兜底
+        self.mqtt = MqttManager(
+            self.api,
+            self.device_id,
+            self.product_id,
+            cloud_ctrl=self._mqtt_cloud_ctrl,
+            on_event=self._mqtt_on_event,
+            certs_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs"),
         )
 
         self._seen_lock_notes: set[str] = set()
@@ -319,6 +335,13 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         """Remember the last fetched temporary-password list."""
         self.snapkey_list = list(keys) if isinstance(keys, list) else []
 
+    def update_media_options(self, **updates) -> None:
+        """Persist cloud-media settings (通道/布局/OSD/节流) into entry options."""
+        self.hass.config_entries.async_update_entry(
+            self.entry,
+            options={**self.entry.options, **updates},
+        )
+
     async def async_create_snapkey_cloud(self, config: Optional[dict] = None) -> dict:
         """按抓包/测试报告(R14)方案生成临时密码:客户端自产 keyId/tempKey,
         经消息域 `iot.message.SmartLockSecretAdd` 直接登记(不加 SetService,
@@ -390,11 +413,79 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         """Public: refresh model/firmware in device registry."""
         await self._async_update_device_info()
 
+    # ------------------------------------------------------------------ MQTT
+    async def async_iot_control(self, api: str, payload: dict) -> dict:
+        """IoT 控制统一入口: MQTT 优先 → 云 API 兜底.
+
+        payload 需已 ref 编码(调用方用 model 编码); 返回 dict, 带 "via" 标记。
+        MQTT 未连接/超时 → 云 API(imou_client.async_post); 均失败抛异常。
+        """
+        try:
+            return await self.mqtt.async_request(api, payload)
+        except ImouAPIError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("MQTT control failed (%s); falling back to cloud", err)
+            data = await self.api.async_post(api, payload)
+            if isinstance(data, dict):
+                data = dict(data)
+                data["via"] = "cloud"
+            return data
+
+    async def _mqtt_cloud_ctrl(self, api: str, params: dict) -> dict:
+        """MQTT 控制失败时的云 API 兜底(SetService/SetProperties 统一入口)."""
+        return await self.api.async_post(api, params)
+
+    async def _mqtt_on_event(self, data: dict) -> None:
+        """MQTT 推送 → 解码属性 → 实时更新 data/实体(完整数据仍靠轮询兜底)."""
+        topic = data.get("topic") or ""
+        msg = data.get("msg") or {}
+        if topic == "iot_response":
+            inner = (msg.get("params") or {}).get("data") or {}
+            props = inner.get("properties") or {}
+            if props:
+                try:
+                    model = await self.api.async_get_model(
+                        self.device_id, self.product_id
+                    )
+                    decoded = model.decode_properties(props) if isinstance(props, dict) else {}
+                    # 合并实时属性到 data(实体 is_on 直接读取)
+                    new_data = dict(self.data or {})
+                    new_data["_mqtt_props"] = decoded
+                    new_data.setdefault("props", {}).update(decoded)
+                    new_data["mqtt_online"] = True
+                    self.async_set_updated_data(new_data)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug("MQTT props decode/update failed", exc_info=True)
+            elif inner.get("code") == 10000:
+                _LOGGER.debug("MQTT response: %s", str(inner)[:200])
+        elif topic == "android_iot_property":
+            # 属性变更推送(如 device online/offline)
+            props = msg.get("data") or msg.get("params") or {}
+            if props:
+                try:
+                    model = await self.api.async_get_model(
+                        self.device_id, self.product_id
+                    )
+                    decoded = model.decode_properties(props) if isinstance(props, dict) else {}
+                    if decoded:
+                        new_data = dict(self.data or {})
+                        new_data.setdefault("props", {}).update(decoded)
+                        self.async_set_updated_data(new_data)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug("MQTT property push decode failed", exc_info=True)
+        _LOGGER.debug("MQTT event: topic=%s keys=%s", topic, list(msg.keys())[:5])
+
+    async def async_start_mqtt(self) -> None:
+        """启动 MQTT 实时通道(首次轮询后调用; 幂等)."""
+        await self.mqtt.async_start()
+
     async def async_shutdown(self) -> None:
         """Cleanup."""
         if self._device_info_update_unsub:
             self._device_info_update_unsub()
             self._device_info_update_unsub = None
+        await self.mqtt.async_stop()
 
 
 def _int_or_none(value: Any) -> Optional[int]:

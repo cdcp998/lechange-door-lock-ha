@@ -24,7 +24,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
         LeChangeSleepingSensor(coordinator, device_id),
         LeChangeTamperSensor(coordinator, device_id),
         LeChangeChildLockSensor(coordinator, device_id),
-        LeChangeOpenDoorByTouchSensor(coordinator, device_id),
     ]
     # 通道在线状态(主/辅摄像头通道)
     for ch in (coordinator.data or {}).get("channels", []):
@@ -56,6 +55,9 @@ class LeChangeOnlineSensor(_BaseLeChangeBinarySensor):
     @property
     def is_on(self) -> bool:
         data = self.coordinator.data or {}
+        # MQTT 通道在线(实时推送)优先; 否则轮询 online/sleeping
+        if data.get("mqtt_online") is True:
+            return True
         if data.get("sleeping") is True:
             return False
         return bool(data.get("online"))
@@ -103,19 +105,6 @@ class LeChangeChildLockSensor(_BaseLeChangeBinarySensor):
     @property
     def is_on(self) -> bool:
         return bool((self.coordinator.data or {}).get("props", {}).get("child_lock"))
-
-
-class LeChangeOpenDoorByTouchSensor(_BaseLeChangeBinarySensor):
-    """Touch to open enabled (触屏开门)."""
-
-    _attr_device_class = BinarySensorDeviceClass.LOCK
-
-    def __init__(self, coordinator, device_id: str) -> None:
-        super().__init__(coordinator, device_id, "open_door_by_touch")
-
-    @property
-    def is_on(self) -> bool:
-        return bool((self.coordinator.data or {}).get("props", {}).get("openDoorByTouch"))
 
 
 class LeChangeChannelOnlineSensor(_BaseLeChangeBinarySensor):

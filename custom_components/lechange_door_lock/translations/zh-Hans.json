@@ -25,9 +25,11 @@
       },
       "device": {
         "title": "选择设备",
-        "description": "请选择要添加的门锁设备。",
+        "description": "请选择要添加的门锁设备, 并输入设备密码体系凭据。\n\n**安全码**: 机身标签(背面/电池仓)二维码+条码旁的 8 位大写字母数字串, 也可能在 App「设备设置→关于设备」或包装盒上。\n\n**设备密码**: 在乐橙 App「修改设备密码」后的当前值; 未修改过则与安全码相同, **留空即可**。\n\n凭据用于: 告警抓拍图解密(安全码)与云端实时预览帧解密(设备密码), 仅保存在本地配置。",
         "data": {
-          "device_id": "设备"
+          "device_id": "设备",
+          "security_code": "安全码(机身标签 8 位)",
+          "device_password": "设备密码(改过才填, 留空=同安全码)"
         }
       }
     },
@@ -37,7 +39,8 @@
       "captcha_needed": "触发风控/人机验证(极验 GT4)。请在**乐橙 App** 完成一次登录验证(滑块)解锁账号,稍后重试。",
       "no_devices": "该账号下未找到设备。",
       "network": "网络错误,请稍后重试。",
-      "unknown": "未知错误。"
+      "unknown": "未知错误。",
+      "security_code_invalid": "安全码格式应为 8 位大写字母+数字(见机身标签)。"
     },
     "abort": {
       "already_configured": "设备已经配置。",
@@ -47,15 +50,26 @@
   "options": {
     "step": {
       "init": {
-        "title": "摄像头(视频)选项",
-        "description": "配置门锁摄像头的 RTSP 源。默认使用添加设备时保存的云端流媒体网关;rtsp_url 优先级最高,其次 rtsp_host(局域网直连),两者留空则使用云端默认地址。",
+        "title": "媒体与连接选项",
+        "description": "门外截图为云端取流抽帧(默认主码流, 双摄自动横向组合)。\n门外截图与实时预览 OSD 默认开启(时间戳左上+通道名右下), 可关闭。取流请求会唤醒电池设备, 节流间隔 ≥60s。",
         "data": {
+          "security_code": "安全码(留空=保持原值)",
+          "device_password": "设备密码(留空=保持原值/同安全码)",
+          "snapshot_min_interval": "门外截图最小间隔(秒, ≥15)",
           "rtsp_url": "完整 RTSP/中转 URL(可选)",
-          "rtsp_host": "局域网 IP(留空=云端流媒体网关)",
+          "rtsp_host": "局域网 IP(留空=纯云端)",
           "rtsp_port": "RTSP 端口",
           "rtsp_username": "RTSP 用户名",
           "rtsp_password": "RTSP 密码",
-          "rtsp_subtype": "码流(0 主码流 / 1 子码流)"
+          "rtsp_subtype": "码流(0 主码流 / 1 子码流)",
+          "snapshot_stream_id": "码流(默认主码流)",
+          "snapshot_osd": "门外截图 OSD(默认开, 时间戳+通道名)",
+          "snapshot_osd_alpha": "OSD 底色不透明度(0-255, 160≈63% 半透明)",
+          "snapshot_layout": "多通道布局(左右/上下/单摄)",
+          "snapshot_channel": "单摄布局通道选择",
+          "channel_hosts": "本地通道地址(每行 通道号=IP[:端口]; 设备在局域网时优先, 留空=云端)",
+          "stream_preview_osd": "实时预览 OSD(默认开, 可关=不带叠加)",
+          "stream_preview_seconds": "实时预览时长(秒, 3-60)"
         }
       }
     }
@@ -129,9 +143,6 @@
       "child_lock": {
         "name": "童锁"
       },
-      "open_door_by_touch": {
-        "name": "触屏开门"
-      },
       "channel_online": {
         "name": "通道 {channel_id} 在线状态"
       }
@@ -185,9 +196,6 @@
       },
       "call_transfer": {
         "name": "呼叫转接"
-      },
-      "open_door_by_touch": {
-        "name": "触屏开门"
       }
     },
     "camera": {

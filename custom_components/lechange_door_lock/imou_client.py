@@ -32,6 +32,7 @@ import random
 import ssl
 import string
 import time
+import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -44,6 +45,7 @@ from .const import (
     APP_ID,
     CA_FILE,
     CONNECT_TIMEOUT,
+    MEDIA_APIVER,
     PROJECT,
     PROTO_VER,
     SUCCESS_CODES,
@@ -96,29 +98,105 @@ def _hmac_sha256_b64(data: str, key: str) -> str:
     return _b64(hmac.new(key.encode(), data.encode(), hashlib.sha256).digest())
 
 
+# 真机特征池(多品牌混合, 按终端标识确定性派生):
+#   - 覆盖三星/小米/OPPO/vivo/荣耀/华为/一加/谷歌 真机型号 + 对应 Build.BRAND;
+#   - terminal_id 稳定派生 → 同一安装机型恒定(每请求漂移本身即是特征),
+#     不同安装分散到不同机型画像 → 避免服务端按单一 UA 特征聚类标记;
+#   - clientOV(Android SDK) 取该机型现实可能的版本集合(One UI/澎湃/HyperOS 升级后混合);
+#   - App 版本(clientVersion)与协议相关, 保持单一固定值不参与随机。
+_DEVICE_POOL: tuple[tuple[str, str, tuple[int, ...]], ...] = (
+    # (terminalModel, terminalBrand, clientOV 候选)
+    ("SM-S921B", "samsung", (34, 35)),      # Galaxy S24
+    ("SM-S928B", "samsung", (34, 35)),      # Galaxy S24 Ultra
+    ("SM-S916B", "samsung", (34, 35)),      # Galaxy S23+
+    ("SM-A556B", "samsung", (34, 35)),      # Galaxy A55
+    ("SM-F731B", "samsung", (34, 35)),      # Galaxy Z Flip5
+    ("23127PN0CC", "Xiaomi", (34, 35)),     # Xiaomi 14(澎湃 OS)
+    ("23013RK75C", "Xiaomi", (34, 35)),     # Redmi K70E
+    ("2201123G", "Xiaomi", (34,)),          # Xiaomi 12 系(停更 14)
+    ("PJZ110", "OnePlus", (34, 35)),        # OnePlus 12(中国版)
+    ("PJT110", "OPPO", (34, 35)),           # OPPO Find X7
+    ("PHK110", "OPPO", (34, 35)),           # OPPO Find X6 Pro
+    ("V2312A", "vivo", (34, 35)),           # vivo S18
+    ("V2302A", "iQOO", (34, 35)),           # iQOO 12
+    ("BVL-AN10", "HONOR", (34, 35)),        # 荣耀 Magic6
+    ("PGT-AN10", "HONOR", (34,)),           # 荣耀 Magic5 Pro
+    ("ALN-AL00", "HUAWEI", (34,)),          # HUAWEI Mate 60
+    ("MNA-AL00", "HUAWEI", (34,)),          # HUAWEI P60
+    ("Pixel 8 Pro", "google", (34, 35)),    # Google Pixel 8 Pro
+    ("Pixel 8", "google", (34, 35)),        # Google Pixel 8
+)
+
+
+def _real_android_id(terminal_id: str) -> str:
+    """真机安卓 terminalId = Settings.Secure ANDROID_ID(16 hex 小写)。
+
+    DEX s7/k#g(): terminalId 源头 = android_id,
+    清单里安卓真机全为 16hex 小写(18ee5ef24011a454 / f27c70bbf54c5c1e)。
+    集成侧统一从持久化 terminal_id 确定性派生(同安装恒定, 平滑迁移):
+      - UUID/任意串 → sha256 前 16 hex 小写
+      - 已是 16hex 小写 → 原样
+    """
+    t = (terminal_id or "").strip()
+    if t and len(t) == 16 and all(c in "0123456789abcdef" for c in t):
+        return t
+    return hashlib.sha256(("dsh-tid:" + (terminal_id or "")).encode()).hexdigest()[:16]
+
+
+def _real_ttid(terminal_id: str) -> str:
+    """真机 ttid = 首装 UUID.randomUUID() 去$ 持久化(DEVICE_TTID)。
+
+    DEX com/lc/lib/http/util/c#d(): 随机 UUID (8-4-4-4-12, 大写带连字符),
+    replaceAll('$', '') 去连字符 → 32 hex 小写存 DEVICE_TTID, 之后恒用;
+    淘宝系终端追踪标识, 真机每条请求都带。集成侧派生自 terminal_id(稳定)。
+    """
+    t = (terminal_id or "").strip()
+    digest = hashlib.sha256(("dsh-ttid:" + t).encode()).hexdigest()
+    return digest[:8] + "-" + digest[8:12] + "-" + digest[12:16] + "-" + digest[16:20] + "-" + digest[20:32]
+
+
+def _pick_device_profile(terminal_id: str) -> tuple[str, str, int, str]:
+    """terminal_id → (model, brand, ov, darkMode), 稳定确定性(无随机数状态)。"""
+    digest = hashlib.sha256(("dsh-ua:" + (terminal_id or "")).encode()).hexdigest()
+    model, brand, ovs = _DEVICE_POOL[int(digest[:8], 16) % len(_DEVICE_POOL)]
+    ov = ovs[int(digest[8:16], 16) % len(ovs)]
+    dark = str(int(digest[16], 16) % 2)
+    return model, brand, ov, dark
+
+
 def _build_client_ua(terminal_id: str = "") -> str:
     """Base64(JSON) user-agent, same shape as the Android client.
 
-    终端标识必须独立于手机 App:集成使用安装时固定生成的 UUID(避免与
-    用户手机 App 的 terminalId 冲突 → 顶号掉线);terminalModel/Brand 用
-    HA 特征值(非 iPhone/Apple),保证作为"另一台终端"存在。
+    终端标识必须独立于手机 App(避免与用户手机 terminalId 冲突 → 顶号掉线),
+    特征值按真机 Android App 对齐(R17/android 类型无真机校验):
+      - terminalId: **16 hex 小写**(真机安卓 = Settings.Secure ANDROID_ID,
+        DEX s7/k#g() 源头;清单中安卓真机全为 16hex:18ee5ef24011a454),
+        由持久化 terminal_id 确定性派生(_real_android_id),同安装恒定;
+        旧 UUID 时代安装平滑迁移(同一 terminal_id → 同一 16hex);
+      - terminalModel/Brand/clientOV/darkMode: 从 _DEVICE_POOL 真机特征池按
+        terminal_id 确定性派生(多品牌混合, 同安装恒定/跨安装分散,
+        避免单一 UA 特征被服务端聚类标记);
+    PC 特征(此前 PC-Client/HA-Integration-Box)会话待遇差、频繁失效
+    (mobile_client.py 结论),故弃用。
     """
-    tid = terminal_id or ("lechange-" + hashlib.md5(str(time.time()).encode()).hexdigest()[:16])
+    tid = _real_android_id(terminal_id or str(_uuid.uuid4()).upper())
+    model, brand, ov, dark = _pick_device_profile(tid)
     data = {
         "clientType": "android",
         "clientVersion": "10.2.2.0831",
-        "clientOV": "15",
+        "clientOV": str(ov),
         "clientOS": "android",
-        "terminalModel": "HA-Integration-Box",
+        "terminalModel": model,
         "terminalId": tid,
         "appid": APP_ID,
         "project": PROJECT,
         "language": "zh-CN",
         "clientProtocolVersion": PROTO_VER,
         "timezoneOffset": "480",
-        "terminalBrand": "Generic",
+        "terminalBrand": brand,
         "country": "CN",
-        "darkMode": "0",
+        "darkMode": dark,
+        "ttid": _real_ttid(terminal_id),
     }
     return _b64(json.dumps(data, separators=(",", ":")).encode())
 
@@ -207,8 +285,6 @@ class ImouClient:
         on_session_update=None,
         terminal_id: str = "",
     ):
-        import uuid as _uuid
-
         self._session = session
         self.username = username        # 账号(登录用 "account\" + username)
         self.password = password
@@ -217,7 +293,8 @@ class ImouClient:
         self.internal_username = internal_username
         self.api_host = api_host or API_ENTRY_HOST
         # 独立终端标识(与手机 App 不同 → 不互顶;集成侧由 entry.options 持久化)
-        self.terminal_id = terminal_id or "lechange-hass-" + _uuid.uuid4().hex[:16]
+        # UUID 格式(App 同款);旧 lechange-hass-* 由 coordinator 一次性迁移。
+        self.terminal_id = terminal_id or str(_uuid.uuid4()).upper()
 
         self._model_cache: dict[str, "ModelInfo"] = {}
         self._on_session_update = on_session_update  # callable(session dict) -> None
@@ -628,29 +705,121 @@ class ImouClient:
         channel_id: Optional[str] = None,
         auth_info: Optional[dict] = None,
     ) -> dict:
-        """Call iot.control.SetService; returns outputData keyed by identifier."""
+        """Call iot.control.SetService; returns outputData keyed by identifier.
+
+        线上协议(2026-09-03 抓包/实测):请求体必须用型号 ref 编码 ——
+        `service` 字段为 ref 数字(remoteOpenDoor -> "26600"),inputData 键
+        亦为 ref,鉴权字段名为 `client`({"authId": ...})。发送 identifier
+        字符串(如 serviceName:"remoteOpenDoor")会被服务端以 11001 拒绝。
+        """
         model = await self.async_get_model(device_id, product_id)
         payload = {
             "deviceId": device_id,
             "productId": product_id,
-            "serviceName": service_name,
-            "inputData": input_data or {},
+            "channelId": channel_id if channel_id not in (None, "") else "0",
+            "service": model.service_ref(service_name),
+            "inputData": model.encode_service_input(service_name, input_data or {}),
         }
-        if channel_id not in (None, "", "0"):
-            payload["channelId"] = channel_id
         if auth_info:
-            payload["authInfo"] = auth_info
+            payload["client"] = (
+                auth_info if isinstance(auth_info, dict) else {"authId": auth_info}
+            )
         data = await self.async_post("iot.control.SetService", payload)
         return model.decode_outputs(data.get("outputData") or {})
 
     async def async_set_properties(
         self, device_id: str, product_id: str, properties: dict, channel_id: str = "0"
     ) -> dict:
-        """Write properties via iot.control.SetProperties (identifier -> value)."""
-        payload = {"deviceId": device_id, "productId": product_id, "properties": properties}
-        if channel_id not in (None, ""):
-            payload["channelId"] = channel_id
+        """Write properties via iot.control.SetProperties (ref-keyed).
+
+        同 SetService:属性键必须用 ref 编码(bool 值转 1/0),identifier 键
+        会被服务端拒绝(10003/11001)。
+        """
+        model = await self.async_get_model(device_id, product_id)
+        payload = {
+            "deviceId": device_id,
+            "productId": product_id,
+            "channelId": channel_id,
+            "properties": model.encode_properties(properties),
+        }
         return await self.async_post("iot.control.SetProperties", payload)
+
+    # ------------------------------------------------------------- media
+    async def async_get_transfer_stream_url(
+        self,
+        device_id: str,
+        product_id: str,
+        channel_id: str = "0",
+        stream_id: str = "1",
+    ) -> str:
+        """云端取流地址 (things.media.GetRealTransferStreamUrl, apiver=191204).
+
+        ★ 该请求兼具唤醒语义: 休眠设备收到后 ~5s 上线(WI-007)。
+        仅主码流 streamId='1' 在中继有数据(子码流返回 SDP 后零包)。
+        返回 resource(TCP:11004); TLS 端口 = 该端口 + 500(与 tls_resource 一致)。
+        """
+        data = await self.async_post(
+            "things.media.GetRealTransferStreamUrl",
+            {
+                "deviceId": device_id,
+                "channelId": channel_id,
+                "streamId": stream_id,
+                "ownerType": "base",
+                "type": "RTSV1",
+                "encrypt": "3",
+                "owner": "",
+                "design": "first",
+                "skipAuth": "false",
+                "assistStream": "false",
+                "imageSize": 0,
+                "productId": product_id,
+                "audioType": 0,
+                "timeLimit": False,
+                "videoLimit": 0,
+            },
+            apiver=MEDIA_APIVER,
+        )
+        url = data.get("resource") or data.get("tls_resource") or ""
+        if not url:
+            raise ImouAPIError(-1, "no resource in GetRealTransferStreamUrl response")
+        return url
+
+    async def async_download_alarm_image(self, url: str) -> bytes:
+        """下载告警抓拍图(picUrl OSS 直链, 带签名与过期时间)。"""
+        async with asyncio.timeout(20):
+            resp = await self._session.get(
+                url, headers={"User-Agent": "okhttp/4.9.2"}
+            )
+            if resp.status != 200:
+                raise ImouAPIError(resp.status, f"alarm image download failed: {url[:80]}")
+            return await resp.read()
+
+    # ------------------------------------------------------------------ MQTT
+    async def async_get_mqtt_credentials(self) -> dict:
+        """获取 MQTT 连接凭据 (client_v2/auth/get, apiver 6550).
+
+        data: {clientId, mqttServer{sslAddr:8883,tcpAddr:1883}, username:
+               "Authorization: x-pcs-signature"}
+        调用方需保证已登录(本方法内部 async_ensure_session)。
+        """
+        await self.async_ensure_session()
+        identifier = "lcbaseapp" + self.terminal_id.replace("-", "")[:16].lower()
+        body = json.dumps(
+            {"data": {"identifier": identifier}}, separators=(",", ":")
+        ).encode()
+        headers = _sign_payload(
+            "POST", "/pcs/v1/client_v2/auth/get", body,
+            "uuid\\" + self.internal_username,
+            self._key1, self._key2, self.session_id,
+            apiver="6550", terminal_id=self.terminal_id,
+        )
+        data = await self._http_post(
+            self.api_host, "/pcs/v1/client_v2/auth/get", body, headers
+        )
+        data["identifier"] = identifier
+        data["token"] = self.token
+        data["uid"] = self.internal_username
+        return data
 
     # ------------------------------------------- 云消息 API(设备休眠也可用)
     # 说明:临时密码相关接口均走「消息域」(apiver=V10.2.2, charset=UTF-8, 测试报告 R13),
@@ -881,3 +1050,67 @@ class ModelInfo:
             if str(item.get("value")) == str(value):
                 return item.get("desc", "")
         return ""
+
+    # ------------------------------------------------- ref encoding (线上协议)
+    def service_ref(self, identifier: str) -> str:
+        """identifier -> ref number string (SetService `service` field).
+
+        线上要求 ref 编码;找不到时回退原值(自定义服务/平台服务名)。
+        """
+        svc = self.services.get(identifier)
+        ref = str(svc.get("ref", "")) if svc else ""
+        return ref or identifier
+
+    def _input_spec(self, service_identifier: str) -> dict[str, dict]:
+        """{identifier: input-prop-spec} for one service."""
+        svc = self.services.get(service_identifier) or {}
+        return {
+            p.get("identifier", ""): p
+            for p in svc.get("inputData") or []
+            if p.get("identifier")
+        }
+
+    def _encode_value(self, p: dict, value: Any) -> Any:
+        """Encode one value by its spec: bool->1/0, struct/array 递归 ref 键."""
+        dt = (p.get("dataType") or {})
+        dtype = dt.get("type", "text")
+        if dtype == "bool":
+            return 1 if value in (True, 1, "1", "true", "True", "on") else 0
+        if dtype == "struct":
+            specs = {f.get("identifier", ""): f for f in dt.get("specs") or []
+                     if f.get("identifier")}
+            if isinstance(value, dict):
+                return {
+                    str(specs[k].get("ref", k)) if k in specs else str(k): v
+                    for k, v in value.items()
+                }
+            return value
+        if dtype == "array":
+            item = dt.get("specs")
+            if isinstance(item, dict) and isinstance(value, list) and value:
+                return [self._encode_value(item, v) for v in value]
+            return value
+        return value
+
+    def encode_service_input(self, service_identifier: str, input_data: dict) -> dict:
+        """{identifier: value} -> {ref: encoded-value} for one service call."""
+        spec = self._input_spec(service_identifier)
+        out: dict[str, Any] = {}
+        for key, value in (input_data or {}).items():
+            p = spec.get(key)
+            if p:
+                out[str(p.get("ref", key))] = self._encode_value(p, value)
+            else:
+                out[str(key)] = value
+        return out
+
+    def encode_properties(self, properties: dict) -> dict:
+        """{identifier: value} -> {ref: encoded-value} for SetProperties."""
+        out: dict[str, Any] = {}
+        for key, value in (properties or {}).items():
+            p = self._props_by_identifier.get(key)
+            if p:
+                out[str(p.get("ref", key))] = self._encode_value(p, value)
+            else:
+                out[str(key)] = value
+        return out

@@ -29,11 +29,12 @@
 - **门锁实体**：`lock.*` 显示 已锁/未锁，支持远程开锁（remoteOpenDoor）。
 - **状态监控**：门锁电池/摄像机电池电量、门状态（关/开）、电量模式、WiFi 信号、最近开门记录。
 - **开门信息**：最近开门时间（格式化）与最近开门方式（密码/卡片/指纹/远程…），来自 `lockNoteReport`。
-- **安全传感器**：在线状态、通道在线状态、休眠状态、防拆报警、童锁、触屏开门。
-- **控制开关**：童锁、呼叫转接、触屏开门（`iot.control.SetProperties`）。
+- **安全传感器**：在线状态、通道在线状态、休眠状态、防拆报警、童锁。
+- **控制开关**：童锁、呼叫转接（`iot.control.SetProperties`）。
 - **远程控制**：远程开门按钮;**「获取门外截图」按钮**(替代原“唤醒设备”——无效操作;拉取摄像头/门铃即唤醒锁体,快照保存到 `www/lechange/` 并经 `/local/...` URL 事件返回)。
-- **📹 视频**：每个摄像头通道生成 camera 实体，默认使用云端流媒体网关地址，支持局域网 RTSP / go2rtc 中转（在集成选项里配置地址）。
+- **📹 视频**：每个摄像头通道生成 camera 实体，**默认云端 RTSV1 实时取流抽帧**（节流 60s，双摄自动组合 + 半透明 OSD；支持局域网 CGI/RTSP/go2rtc 覆盖）。
 - **🗣️ 对话**：应答/拒绝/挂断门铃呼叫（CallAnswer/CallRefuse/CallHangup）、获取/设置语音回复（GetVoiceReply/SetVoiceReply）。
+- **📡 MQTT 实时通道**：设备在线状态/属性推送实时更新（WI-003）；控制指令（如远程开门）**MQTT 优先 → 云 API 自动兜底**；断线自动重试，不影响轮询。
 - **🔑 临时密码**：**实体化配置**（名称/使用次数/有效天数/生效星期/时间段，number·select·text·time 四类实体）+「生成临时密码」「刷新列表」「删除」按钮服务 + 数量传感器；基于消息域云 API（`iot.message.SmartLockSecretAdd/ListV2/Delete`），**设备休眠可用、客户端自产密码、不触发短信验证码**。
 - **云侧告警**：轮询 `cloud.message.GetDeviceAlarmMixMessage`（抓包验证，设备休眠照常返回），新告警触发 `alarm` 事件，`最新告警` 传感器展示标签/时间/消息。
 - **开门记录**：轮询 `lockNoteReport` 属性，新记录会触发事件。
@@ -49,6 +50,10 @@
 1. 将文件夹 `lechange_door_lock` 复制到 Home Assistant 的 `custom_components` 目录下。
 2. 重启 Home Assistant。
 
+> **⚠️ ffmpeg 依赖**: 门外截图/实时预览 OSD 需要 ffmpeg。HA OS/Supervised 自带
+> (集成已声明 `dependencies: ["ffmpeg"]`); 若使用容器/自定义安装, 请确保 ffmpeg
+> 在 PATH 中(可用 `ffmpeg -version` 验证), 缺失时快照/预览功能不可用并记录日志提示。
+
 ### 🔧 配置说明
 1. 进入 **设置 → 设备与服务 → 添加集成 → LeChange Door Lock**。
 2. 输入您的**乐橙 App 账号**,并选择登录方式:
@@ -62,18 +67,25 @@
 > 短信验证码登录不保存密码,**会话失效后需重新添加配置**(不支持自动重登)。
 
 ### 📹 视频(摄像头)配置
-添加设备时,集成会自动保存账号下的**云端流媒体网关**地址(`streamEntryAddrV3` / `mediaConfig.streamUrl`,
-如 `nginxdeviceproxy-online-hz.imou.com:443`),camera 实体默认使用该云端地址拼装 RTSP 源。
-如需调整,进入集成的 **选项(选项 → 摄像头)** 配置:
-- `rtsp_url`：完整 RTSP/中转地址（最高优先级），也支持 go2rtc 地址。
-- `rtsp_host`：局域网 IP（留空则默认使用云端流媒体网关,端口 443）。
-- `rtsp_port` / `rtsp_username` / `rtsp_password`：RTSP 端口与凭证（默认 554/admin）。
-- `rtsp_subtype`：码流（0 主码流 / 1 子码流）。
-- 局域网快照(`cgi-bin/snapshot.cgi`)仅在 `rtsp_host` 为局域网 IPv4 时生效。
-- 设备休眠/离线时无法取流,与 App 行为一致。
+添加设备时集成会保存账号下的云端信息,并为每个摄像头通道生成 camera 实体。
+**v1.5.0 起默认走云端 RTSV1 私有协议实时取流抽帧**(WI-007 全链路逆向,
+无需 LAN/开放平台),电池设备自动节流。进入集成的 **选项** 可细调:
+- `security_code`：**安全码**（机身标签 8 位,出厂代）→ 告警抓拍图解密（必须）。
+- `device_password`：**设备密码**（App 修改设备密码后的当前值）→ 云端预览帧解密；
+  未改过则与安全码相同,留空即可。
+- `snapshot_min_interval`：门外截图最小间隔（默认 60s,`≥15`;取流请求会唤醒电池设备）。
+- `snapshot_stream_id`：码流偏好,默认主码流 `1`;子码流实测中继无数据,自动回退主码流。
+- `snapshot_layout`：双摄组合布局 — `hstack` 左右(默认) / `vstack` 上下 / `single` 单摄单图。
+- `snapshot_channels`：组合通道 — `0+1` 双摄(默认) / `0` 仅猫眼 / `1` 仅辅摄。
+- `snapshot_osd` / `snapshot_osd_alpha`：OSD 叠加层(时间戳+通道标签)开关与底色不透明度。
+- `channel_hosts`：**本地通道地址接口**（每行 `通道号=局域网IP[:端口]`,如
+  `0=192.168.1.10:80`）;设备在 LAN 时优先走 `cgi-bin/snapshot.cgi` 直连快照
+  （无唤醒、零云端流量）,设备不在本网时自动回退云端链路 —— 接口常驻,回网即生效。
+- `rtsp_url` / `rtsp_host`：传统 RTSP/go2rtc 中转覆盖（可选,优先级高于云端快照）。
 
-> 云端流媒体网关走私有握手/加密(streamEncryModel),若无法直接推流,推荐配置
-> `rtsp_url` 指向 go2rtc 等中转服务,或改用局域网直连 RTSP。
+> 云端取流走私有 TLS/WSSE 握手(`rtpxav` 中继 + DHAV 帧加密),HA camera 实体以
+> **轮询快照**方式呈现(未配置 RTSP 覆盖时不声明 STREAM 特性);配置了 `rtsp_url`
+> 或局域网 RTSP 则仍可由 HA stream 组件全帧播放。
 
 ### 🖥️ 使用说明
 #### 实体列表（每台设备）
@@ -84,11 +96,11 @@
 | 传感器 | 门状态 / 电量模式 / WiFi 信号 / 最近开门记录 | `sensor.<name>_door_state` 等 |
 | 传感器 | 最近开门时间 / 最近开门方式 | `sensor.<name>_latest_open_door_time` 等 |
 | 传感器 | 临时密码数量（属性含列表与最近生成） | `sensor.<name>_snapkey_count` |
-| 二进制传感器 | 在线 / 休眠 / 防拆 / 童锁 / 触屏开门 | `binary_sensor.<name>_online` 等 |
+| 二进制传感器 | 在线 / 休眠 / 防拆 / 童锁 | `binary_sensor.<name>_online` 等 |
 | 二进制传感器 | 通道 0 / 1 在线状态 | `binary_sensor.<name>_channel_online` 等 |
 | 按钮 | 远程开门 / **获取门外截图** | `button.<name>_open_door` / `button.<name>_snapshot_door` |
 | 按钮 | 生成临时密码 / 刷新临时密码列表 | `button.<name>_generate_snapkey` 等 |
-| 开关 | 童锁 / 呼叫转接 / 触屏开门 | `switch.<name>_child_lock` 等 |
+| 开关 | 童锁 / 呼叫转接 | `switch.<name>_child_lock` 等 |
 | 数字/选择/文本/时间 | 临时密码配置（次数/天数/星期/名称/时间段） | `number.<name>_snapkey_*` 等（配置类） |
 | 摄像头 | 通道 0 / 1 摄像头（视频） | `camera.<name>_camera_0` 等 |
 
@@ -116,6 +128,8 @@
 | `lechange_door_lock.get_snapkey_list` | 临时密码分组列表（云,设备休眠可用） |
 | `lechange_door_lock.delete_snapkey` | 删除临时密码（需 keyId,extra 可传全字段） |
 | `lechange_door_lock.get_open_door_record` | 开门记录 |
+| `lechange_door_lock.doorfront_snapshot` | 门外截图（云端取流抽帧;支持 `channels`/`layout`/`osd` 按次覆盖,结果经事件+可选保存） |
+| `lechange_door_lock.alarm_image` | 告警抓拍图（picUrl 下载+DHAV 解码,`alarm_id` 可选,结果经事件） |
 | `lechange_door_lock.set_properties` | 通用属性写入 |
 | `lechange_door_lock.call_service` | 通用服务调用（高级/调试） |
 
@@ -123,6 +137,8 @@
 服务与轮询通过 `lechange_door_lock_event` 事件返回结果，`type` 取值：
 - `open_door` / `wake_up` / `call_answer` / `call_refuse` / `call_hangup`
 - `snapshot`（门外截图已保存，含 `url`/`bytes` 字段）
+- `doorfront_snapshot`（云端门外截图,含 `size`/`url`/`channels`/`layout`）
+- `alarm_image`（告警抓拍图解码,含 `alarm_id`/`time`/`title`/`url`）
 - `voice_reply_list` / `voice_reply_set` / `snapkey_created` / `snapkey_list` / `snapkey_deleted`
 - `open_door_records` / `set_properties` / `service_result`
 - `open_record`（新开门记录，含 `record` 字段，如用户/方式）
@@ -173,7 +189,7 @@ CI(`.github/workflows/hacs.yml`)同时运行 [HACS Action](https://github.com/ha
 - **开锁为高危操作**：服务/按钮会直接远程开锁，请谨慎配置自动化，并注意是否已开启 App 内的远程开门确认。
 - **节流**：`cloud_polling` 默认 30 秒轮询；若账号同时被多个集成使用，请调大 `update_interval`。
 - **人机验证**：若连续输错密码或触发了风控，登录会失败（需在 App 中完成验证后再试）。
-- **终端管理账号**：集成为独立 PC 型终端(android/HA-Integration-Box + 固定 terminalId,不与手机 App 同终端,不会顶号);若账号开启终端管理,请直接在 App 「终端管理」完成授权(集成侧可发送授权验证码:服务 `lechange_door_lock.send_sms_code`,usage=GrantingCredit;实测授权提交需 App 授权页上下文)。
+- **终端管理账号**：集成为**真机特征安卓终端**(clientType=android + 真机型号 SM-S921B/samsung + 安装时固定生成的 UUID terminalId,持久化于集成选项,不与手机 App 同终端,不会顶号;phone 型终端有真机校验无法模拟,PC 特征终端会话易失效故弃用);若账号开启终端管理,请直接在 App 「终端管理」完成授权(集成侧可发送授权验证码:服务 `lechange_door_lock.send_sms_code`,usage=GrantingCredit;实测授权提交需 App 授权页上下文)。
 
 ### 📜 更新日志
 统一更新日志见 [CHANGELOG.md](CHANGELOG.md)(发布时 CI 会自动提取并作为 Release 说明)。
