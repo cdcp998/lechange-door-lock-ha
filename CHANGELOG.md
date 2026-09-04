@@ -10,6 +10,20 @@
 
 ---
 
+## [未发布]
+
+### 修复
+- **添加设备最后一步 "Unknown error occurred"(经常出现)**:自 v1.2.0(迁移
+  至客户端私有云协议)起,`async_login` 返回键 `"username"`(云端内部账号),
+  而配置流程最后一步(设备选择+安全码)读取不存在的键 `"internal_username"`
+  → `KeyError` 未捕获 → HA 前端报 "未知错误",设备无法通过配置流程添加。
+  现改为:键名双兼容回退(`internal_username` → `username`),最后一步全部
+  字段缺键回退兜底,登录数据整体缺失时也能创建 entry(由 EVERGREEN 自动续期链
+  补全会话),不再出现未捕获异常。新增回归测试 6 例
+  (`tests/test_config_flow_device_step.py`,自带 homeassistant 最小桩)。
+
+---
+
 ## [v1.6.1] - 2026-09-04
 
 ### UI 增强

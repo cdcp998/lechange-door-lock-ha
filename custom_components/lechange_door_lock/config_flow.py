@@ -117,7 +117,13 @@ async def http_send_code(username: str, session_id: str = "", usage: str = "SMSL
 
 
 async def http_list_devices(username: str, password: str, session_data: dict) -> list[dict]:
-    """Login (reuse session) and list devices."""
+    """Login (reuse session) and list devices.
+
+    login_data 里内部账号键为 "username"(_apply_login_response 统一返回形态),
+    兼容历史 "internal_username"; 两者皆缺(极端:短信登录后重登失败但本地仍有
+    旧会话)时回退 "" —— 客户端签名退化为 logged_in=False → async_ensure_session
+    自动重新登录, 不能让 KeyError 冒泡成流程"未知错误"。
+    """
     async with aiohttp.ClientSession() as session:
         client = ImouClient(
             session,
@@ -125,7 +131,11 @@ async def http_list_devices(username: str, password: str, session_data: dict) ->
             password=password,
             session_id=session_data.get("session_id"),
             token=session_data.get("token"),
-            internal_username=session_data.get("internal_username"),
+            internal_username=(
+                session_data.get("internal_username")
+                or session_data.get("username")
+                or ""
+            ),
             api_host=session_data.get("host"),
         )
         return await client.async_get_devices()
@@ -371,21 +381,29 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             security_code = str(user_input.get(CONF_SECURITY_CODE, "")).strip()
             device_password = str(user_input.get(CONF_DEVICE_PASSWORD, "")).strip()
-            return self.async_create_entry(
-                title=device["name"],
-                data={
-                    CONF_USERNAME: self._login_data["username_input"],
-                    CONF_PASSWORD: self._login_data["password_input"],
-                    CONF_SESSION_ID: self._login_data["session_id"],
-                    CONF_TOKEN: self._login_data["token"],
-                    CONF_INTERNAL_USERNAME: self._login_data["internal_username"],
-                    CONF_USER_ID: self._login_data.get("user_id"),
-                    CONF_API_HOST: self._login_data["host"],
+            login = self._login_data or {}
+            # 登录数据缺键不再抛 KeyError(会以 HA "未知错误"收场): 全部回退空值,
+            # 由 setup 阶段 EVERGREEN 自动续期链补全会话。
+            try:
+                data = {
+                    CONF_USERNAME: login.get("username_input", self._username),
+                    CONF_PASSWORD: login.get("password_input", self._password),
+                    CONF_SESSION_ID: login.get("session_id", ""),
+                    CONF_TOKEN: login.get("token", ""),
+                    # _apply_login_response 统一返回键为 "username";
+                    # 兼容历史 "internal_username"。
+                    CONF_INTERNAL_USERNAME: (
+                        login.get("internal_username")
+                        or login.get("username")
+                        or ""
+                    ),
+                    CONF_USER_ID: login.get("user_id"),
+                    CONF_API_HOST: login.get("host", ""),
                     CONF_DEVICE_ID: device_id,
-                    CONF_DEVICE_NAME: device["name"],
-                    CONF_PRODUCT_ID: device["productId"],
-                    CONF_MODEL_NAME: device["model"],
-                    CONF_FIRMWARE_VERSION: device["version"],
+                    CONF_DEVICE_NAME: device.get("name") or device_id,
+                    CONF_PRODUCT_ID: device.get("productId", ""),
+                    CONF_MODEL_NAME: device.get("model", ""),
+                    CONF_FIRMWARE_VERSION: device.get("version", ""),
                     CONF_CHANNEL_JSON: json.dumps(
                         device.get("channels", []), ensure_ascii=False
                     ),
@@ -396,8 +414,11 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # 未修改过设备密码时与安全码相同 → 留空回退用安全码。
                     CONF_SECURITY_CODE: security_code,
                     CONF_DEVICE_PASSWORD: device_password or security_code,
-                },
-            )
+                }
+                return self.async_create_entry(title=device.get("name") or device_id, data=data)
+            except (TypeError, ValueError) as err:
+                _LOGGER.exception("Device step data build failed: %s", err)
+                return self.async_abort(reason="device_not_found")
 
         devices_dict = {
             d["deviceId"]: f"{d['name']} ({d['deviceId']}){'' if ImouClient.is_lock(d) else ' ·非门锁'}"
