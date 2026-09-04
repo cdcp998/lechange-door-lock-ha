@@ -1,6 +1,6 @@
 """云端媒体管理: 门外截图(节流+缓存) 与 告警图解码。
 
-电池设备约束(WI-007 运维知识):
+电池设备约束:
   - 取流请求(GetRealTransferStreamUrl)自带唤醒语义(~5s 上线, 窗口 30-60s);
   - 唤醒泵(>2 次/30s)触发设备保护 → 快照必须节流(默认 60s, 可配置);
   - 中继等设备仅 ~10s → 休眠唤醒后先等再 PLAY;
@@ -124,7 +124,7 @@ class MediaManager:
     def snapshot_stream_id(self) -> str:
         """取流码流偏好: '1'主码流(默认) / '2'子码流(用户要求时)。
 
-        ★ WI-007 实测: 仅主码流在中继有数据, 子码流 SDP 后零包;
+        ★ 实测: 仅主码流在中继有数据, 子码流 SDP 后零包;
         故选子码流但采流为空时自动回退主码流一次。
         """
         opts = self.coordinator.entry.options or {}
@@ -427,7 +427,7 @@ class MediaManager:
         """单通道采流+抽帧; 返回 (jpeg, fell_back_main)。
 
         wake_first=先发取流请求再等设备上线(休眠唤醒);
-        所选码流为空时自动回退主码流('1')重试一次(子码流中继无数据, WI-007)。
+        所选码流为空时自动回退主码流('1')重试一次(子码流中继无数据)。
         """
         coord = self.coordinator
         sid = stream_id or self.snapshot_stream_id

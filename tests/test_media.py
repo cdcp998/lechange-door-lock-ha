@@ -525,7 +525,7 @@ class TestFontfileColonEscape:
 
 class TestStreamKey:
     def test_stream_key_matches_preview_live_kdf(self):
-        # 与 API/scripts/preview_live.py 相同的 KDF 结构
+        # 与组件内 rtsv.py 相同的 KDF 结构
         import hashlib
 
         fmt = "admin:Login to %s:%s" % (DID, DEVPW)

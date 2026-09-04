@@ -2,7 +2,7 @@
 
 链路优先级:
   1. rtsp_url / rtsp_host(局域网 Dahua CGI) — 用户显式覆盖时走传统路径
-  2. 云端 RTSV1 门外截图(WI-007 协议, media.py 节流): 电池设备默认路径,
+  2. 云端 RTSV1 门外截图(media.py 节流): 电池设备默认路径,
      取流请求自带唤醒 → 强制节流(默认 60s, options 可调), 区间内返回缓存帧
 
 云端链路无法输出 RTSP URL(HA stream 组件需要), 故仅在配置了

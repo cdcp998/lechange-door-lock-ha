@@ -1,4 +1,4 @@
-"""DHAV 告警抓拍图解码 (WI-006, 从 API/scripts/dav_decode.py 移植).
+"""DHAV 告警抓拍图解码.
 
 容器结构(实测):
   [0x00-0x43]   DHAV 头; [0x33-0x42] IV(16×同一随机字节, 每图不同)
@@ -7,7 +7,7 @@
   [0x1EB..]     'dhav' 子包 → SOF0 起全程明文 JPEG
   [尾部]        ffd9 + 'dhav' + 大小页脚
 
-KDF(与实时流同构, WI-008 两套密码体系):
+KDF(与实时流同构, 两套密码体系):
   password = MD5("admin:Login to {device_id}:{安全码}").hex().upper()
   key      = PBKDF2-HMAC-SHA256(password, salt=device_id, 20000轮, 32B)
 加密 AES-256-OFB, IV=data[0x33:0x43]。

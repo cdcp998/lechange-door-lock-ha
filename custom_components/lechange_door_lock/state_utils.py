@@ -115,7 +115,7 @@ def weekday_bitmask(mode: str) -> int:
     """星期位掩码(smartLockSecretAdd 的 usagePeriod 前缀)。
 
     位定义与设备模型 period 枚举一致:bit0=周日 .. bit6=周六;127=每天。
-    依据抓包:`"usagePeriod":"127-20260903T0000Z-20260904T2359Z"`。
+    格式示例:`"usagePeriod":"127-20260903T0000Z-20260904T2359Z"`。
     """
     return sum(1 << p for p in weekday_mode_to_periods(mode))
 
@@ -125,7 +125,7 @@ def build_usage_period(
 ) -> str:
     """构建 SmartLockSecretAdd.usagePeriod,如 '127-20260903T0000Z-20260904T2359Z'.
 
-    结束日期 = 开始日期 + 有效天数(App 抓包:effectTimes=1 → 当日00:00 至次日23:59)。
+    结束日期 = 开始日期 + 有效天数(effectTimes=1 → 当日00:00 至次日23:59)。
     """
     if now is None:
         now = datetime.now()

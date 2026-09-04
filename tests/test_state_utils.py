@@ -138,7 +138,7 @@ class TestOpenRecordDisplay:
 
 
 class TestUsagePeriod:
-    """依据抓包:'127-20260903T0000Z-20260904T2359Z'(247/263 记录)."""
+    """格式示例:'127-20260903T0000Z-20260904T2359Z'."""
 
     def test_bitmask_every_day(self):
         assert weekday_bitmask("Every day") == 127

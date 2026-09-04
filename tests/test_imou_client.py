@@ -231,43 +231,34 @@ class TestHttpPostAndErrors:
 
 
 class TestGrantingCredit:
-    async def test_granting_credit_full_chain(self, monkeypatch):
-        """终端授权完整链(分析文件 §一):CheckValidCode→accessToken→GrantingCredit.
+    async def test_granting_credit_direct_code(self, monkeypatch):
+        """终端授权链(线上协议校准):短信原码直传,无 CheckValidCode 中间步.
 
+        报文形状:GrantingCredit {validCode:"049400", type:"phone",
+        account:AES加密, isEncrypt:true} → 10000。
         加密函数打桩(不依赖 pycryptodome,CI 亦可确定);真实加密见 roundtrip 测试。
         """
         monkeypatch.setattr(ic, "_enc_account", lambda a: "ENC(" + a + ")")
         calls = []
 
-        def check_valid():
-            calls.append("check")
-            return _resp({"code": 10000, "data": {"accessToken": "AT-123"}})
-
         def granting():
             calls.append("grant")
             return _resp({"code": 10000, "data": {}})
 
-        session = FakeSession({
-            "common.validcode.CheckValidCode": check_valid,
-            "user.account.GrantingCredit": granting,
-        })
+        session = FakeSession({"user.account.GrantingCredit": granting})
         client = ImouClient(session, session_id="s", token="t", internal_username="u",
                             api_host="https://gw.example.com")
-        await client.async_granting_credit("13800000000", "123456")
-        assert calls == ["check", "grant"]
-        check_kwargs = session.calls_full[0][1]
-        assert json.loads(check_kwargs["data"])["data"]["validCode"] == "123456"
-        assert json.loads(check_kwargs["data"])["data"]["usage"] == "GrantingCredit"
-        grant_kwargs = session.calls_full[1][1]
-        body = json.loads(grant_kwargs["data"])["data"]
-        # validCode 必须是 accessToken(非短信码)
-        assert body["validCode"] == "AT-123"
-        assert body["type"] == "grantingCredit"
+        await client.async_granting_credit("13800000000", "049400")
+        assert calls == ["grant"]  # 无 CheckValidCode 中间步
+        body = json.loads(session.calls_full[0][1]["data"])["data"]
+        # validCode = 短信验证码原码;type 固定 "phone"
+        assert body["validCode"] == "049400"
+        assert body["type"] == "phone"
         assert body["isEncrypt"] is True
         assert body["account"] == "ENC(13800000000)"
 
     def test_enc_account_roundtrip(self):
-        """真实 AES-GCM 加密可解回(App n40/h.s 同款;无 pycryptodome 则跳过)."""
+        """真实 AES-GCM 加密可解回(线上客户端同款;无 pycryptodome 则跳过)."""
         pytest.importorskip("Crypto")
         from Crypto.Cipher import AES
         import base64 as _b64
@@ -280,18 +271,20 @@ class TestGrantingCredit:
         c = AES.new(key, AES.MODE_GCM, nonce=raw[:12])
         assert c.decrypt_and_verify(raw[12:-16], raw[-16:]).decode() == "13800000000"
 
-    async def test_granting_credit_no_access_token_raises(self):
+    async def test_granting_credit_no_encryption_fallback(self):
+        """无加密时仍按线上形状提交(明文 + isEncrypt:false 由方法内部兜底)."""
         session = FakeSession({
-            "common.validcode.CheckValidCode": lambda: _resp({"code": 10000, "data": {}}),
+            "user.account.GrantingCredit": lambda: _resp({"code": 10000, "data": {}}),
         })
         client = ImouClient(session, session_id="s", token="t", internal_username="u",
                             api_host="https://gw.example.com")
-        with pytest.raises(ImouAPIError):
-            await client.async_granting_credit("13800000000", "123456")
+        await client.async_granting_credit("13800000000", "049400", is_encrypt=False)
+        body = json.loads(session.calls_full[0][1]["data"])["data"]
+        assert body["validCode"] == "049400" and body["type"] == "phone"
 
 
 class TestMessageDomain:
-    """消息域(R13):iot.message.* 用 apiver=V10.2.2 + charset=UTF-8."""
+    """消息域:iot.message.* 用 apiver=V10.2.2 + charset=UTF-8."""
 
     def _client(self, session) -> ImouClient:
         return ImouClient(session, session_id="s", token="t", internal_username="u",
@@ -572,25 +565,31 @@ class TestRefEncoding:
         assert decoded["openDoorCombined"] is True
 
 
-# ----------------------------------------------------------- client-ua (R17)
+# ----------------------------------------------------------- client-ua
 class TestClientUA:
-    """client-ua 终端特征:真机 Android 对齐(接口测试报告 R17)."""
+    """client-ua 终端特征:线上 Android 客户端对齐."""
 
     @staticmethod
     def _decode(ua: str) -> dict:
         return json.loads(base64.b64decode(ua.encode()).decode())
 
     def test_android_device_signature(self):
-        """clientType=android + 真机型号/品牌(来自混合品牌特征池)."""
+        """UA 字段(线上样本): clientType=phone / clientOS=Android 大写 /
+        clientVersion=V10.2.2 / clientOV="Android 14" / language=zh_CN /
+        timezoneOffset=28800(秒) / 无 country / 无 darkMode."""
         ua = self._decode(ic._build_client_ua("11111111-2222-3333-4444-555555555555"))
         pool = {m for m, _b, _o in ic._DEVICE_POOL}
         brand_of = {m: b for m, b, _o in ic._DEVICE_POOL}
-        assert ua["clientType"] == "android"
-        assert ua["clientOS"] == "android"
+        assert ua["clientType"] == "phone"
+        assert ua["clientOS"] == "Android"
+        assert ua["clientVersion"] == "V10.2.2"
+        assert ua["clientOV"] == "Android 14"
+        assert ua["language"] == "zh_CN"
+        assert ua["timezoneOffset"] == "28800"
+        assert "country" not in ua
+        assert "darkMode" not in ua
         assert ua["terminalModel"] in pool
         assert ua["terminalBrand"] == brand_of[ua["terminalModel"]]
-        assert ua["clientOV"].isdigit()
-        assert ua["darkMode"] in ("0", "1")
         assert ua["appid"] == ic.APP_ID
         assert ua["project"] == ic.PROJECT
         assert ua["clientProtocolVersion"] == ic.PROTO_VER
@@ -611,7 +610,7 @@ class TestClientUA:
         assert len(models) >= 5  # 池 ≥18 机型, 200 个终端必命中多款
 
     def test_terminal_id_derived_to_16hex(self):
-        """UA 内 terminalId = 真机 android_id 格式(16hex 小写, DEX s7/k#g)。
+        """UA 内 terminalId = 线上 android_id 格式(16hex 小写)。
 
         持久化层 terminal_id 保持 UUID(兼容旧装), UA 内确定性派生 16hex,
         同一 terminal_id → 同一 16hex(平滑迁移), 16hex 输入原样透传。
@@ -624,16 +623,15 @@ class TestClientUA:
         # 同输入恒定
         assert ic._real_android_id(tid) == ic._real_android_id(tid)
         # 16hex 原样透传
-        assert ic._real_android_id("18ee5ef24011a454") == "18ee5ef24011a454"
+        assert ic._real_android_id("0123456789abcdef") == "0123456789abcdef"
 
     def test_ua_carries_ttid(self):
-        """真机 UA 带 ttid(首装 UUID 持久化, DEX util/c#d): 8-4-4-4-12 恒定."""
+        """UA 带 ttid(线上样本: 32hex 无连字符)."""
         tid = "A1B2C3D4-0000-1111-2222-333344445555"
         ua = self._decode(ic._build_client_ua(tid))
         ttid = ua.get("ttid", "")
-        parts = ttid.split("-")
-        assert [len(p) for p in parts] == [8, 4, 4, 4, 12]
-        assert all(c in "0123456789abcdef" for c in ttid.replace("-", ""))
+        assert len(ttid) == 32
+        assert all(c in "0123456789abcdef" for c in ttid)
         assert ttid == ic._real_ttid(tid)  # 稳定
 
     def test_generated_terminal_id_is_uuid(self):

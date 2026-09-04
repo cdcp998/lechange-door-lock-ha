@@ -1,13 +1,12 @@
 """LeChange (Imou) client-side cloud API client.
 
-Implements the protocol captured from the official Android app
-(com.mm.android.lc) — see API/report/乐橙登录协议与门锁API分析.md:
+Implements the protocol used by the official mobile clients:
 
   POST /pcs/v1/<api>  (regional gateway from GetToken response)
   headers x-pcs-* (nonce/date/client-ua/MD5/SHA256 dual signature)
 
 Login (before session):
-  username header = "account\\" + <phone>
+  username header = "account\\" + <phone>     (源码字面量为 "account\\")
   key1 = md5(md5(password)).lower()
   key2 = sha256(sha256(password)).lower()
 
@@ -18,6 +17,23 @@ After GetToken:
   + x-pcs-session-id header
 
 All APIs share the same gateway / signing scheme.
+
+会话信任模型(线上行为观察):
+  - host 架构: app-v2.imou.com = 登录 + HTTP 业务主通道(全部 pcs/v1);
+    iotaccess.lechange.cn:10001 = IoT 设备直连(TCP/P2P, 非 HTTP 业务);
+    app-gz-hw 等为区域节点(entryUrlV2 分发)。
+  - sid 持久: App 安装时生成(MMKV), 每次登录复用同一 sid; token 每次签发。
+  - token 信任度继承来源 sid 的登录历史: 有登录史的 sid(≥1 次 Login 10000)
+    签发的 token 直接激活; 无登录史的 sid → token 未激活 → Login/业务 12001。
+  - GetToken 签发新 token ⇔ 账号级无活跃 token 或 sid 带 12002 续期标记;
+    否则 10000 + {failNum}(failNum=今日累计错误密码次数, 每日0点清, 与token无关)。
+  - 单账号单活跃 token(多端拉锯): 各端登录互相顶替, 被顶端静默重登
+    (App 自动 / 集成端 12001 检测 → 密码 GetToken 自主续期 → Login, 见
+    async_login_evergreen)。
+  - GT4: 账号风险态/新终端首登时 GetToken→12114(captchaData.verifyToken);
+    解法 = 网页滑块(gt4_helper 生成, 用户手动) → 四元组 → CheckGeeTest4(default 前缀身份)
+    → 重试 GetToken。default 前缀身份的签名密钥 = md5hex(SK)/sha256hex(SK);
+    OEM AK/SK 不随源码分发,由使用者通过环境变量提供(见 const.py)。
 """
 
 from __future__ import annotations
@@ -45,7 +61,10 @@ from .const import (
     APP_ID,
     CA_FILE,
     CONNECT_TIMEOUT,
+    GT4_CAPTCHA_ID,
     MEDIA_APIVER,
+    OEM_AK,
+    OEM_SK,
     PROJECT,
     PROTO_VER,
     SUCCESS_CODES,
@@ -76,7 +95,7 @@ def _b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
 
 
-# 账号 AES-GCM 加密(指南 §4.2 / n40/h.s()):
+# 账号 AES-GCM 加密(线上客户端 isEncrypt=true 时的账号字段加密):
 #   key=SHA256("F9TtRyv7X89nM0vp2EKOjdKLFnjlrN9rENCRYPTKEY")
 #   随机 12B nonce 前置 + AES-256-GCM(密文+tag),整体 Base64 —— 已实测服务端可解
 _ENCRYPT_KEY = hashlib.sha256(b"F9TtRyv7X89nM0vp2EKOjdKLFnjlrN9rENCRYPTKEY").digest()
@@ -98,8 +117,8 @@ def _hmac_sha256_b64(data: str, key: str) -> str:
     return _b64(hmac.new(key.encode(), data.encode(), hashlib.sha256).digest())
 
 
-# 真机特征池(多品牌混合, 按终端标识确定性派生):
-#   - 覆盖三星/小米/OPPO/vivo/荣耀/华为/一加/谷歌 真机型号 + 对应 Build.BRAND;
+# 设备特征池(多品牌混合, 按终端标识确定性派生):
+#   - 覆盖三星/小米/OPPO/vivo/荣耀/华为/一加/谷歌 常见机型 + 对应 Build.BRAND;
 #   - terminal_id 稳定派生 → 同一安装机型恒定(每请求漂移本身即是特征),
 #     不同安装分散到不同机型画像 → 避免服务端按单一 UA 特征聚类标记;
 #   - clientOV(Android SDK) 取该机型现实可能的版本集合(One UI/澎湃/HyperOS 升级后混合);
@@ -129,10 +148,8 @@ _DEVICE_POOL: tuple[tuple[str, str, tuple[int, ...]], ...] = (
 
 
 def _real_android_id(terminal_id: str) -> str:
-    """真机安卓 terminalId = Settings.Secure ANDROID_ID(16 hex 小写)。
+    """线上安卓客户端 terminalId = Settings.Secure ANDROID_ID(16 hex 小写)。
 
-    DEX s7/k#g(): terminalId 源头 = android_id,
-    清单里安卓真机全为 16hex 小写(18ee5ef24011a454 / f27c70bbf54c5c1e)。
     集成侧统一从持久化 terminal_id 确定性派生(同安装恒定, 平滑迁移):
       - UUID/任意串 → sha256 前 16 hex 小写
       - 已是 16hex 小写 → 原样
@@ -144,19 +161,18 @@ def _real_android_id(terminal_id: str) -> str:
 
 
 def _real_ttid(terminal_id: str) -> str:
-    """真机 ttid = 首装 UUID.randomUUID() 去$ 持久化(DEVICE_TTID)。
+    """线上客户端 ttid = 首装 UUID.randomUUID() 去连字符持久化(DEVICE_TTID) → 32hex。
 
-    DEX com/lc/lib/http/util/c#d(): 随机 UUID (8-4-4-4-12, 大写带连字符),
-    replaceAll('$', '') 去连字符 → 32 hex 小写存 DEVICE_TTID, 之后恒用;
-    淘宝系终端追踪标识, 真机每条请求都带。集成侧派生自 terminal_id(稳定)。
+    线上客户端 ttid 为 32 hex 无连字符。集成侧派生自 terminal_id(同安装恒定, 平滑迁移)。
     """
     t = (terminal_id or "").strip()
-    digest = hashlib.sha256(("dsh-ttid:" + t).encode()).hexdigest()
-    return digest[:8] + "-" + digest[8:12] + "-" + digest[12:16] + "-" + digest[16:20] + "-" + digest[20:32]
+    return hashlib.sha256(("dsh-ttid:" + t).encode()).hexdigest()[:32]
 
 
 def _pick_device_profile(terminal_id: str) -> tuple[str, str, int, str]:
-    """terminal_id → (model, brand, ov, darkMode), 稳定确定性(无随机数状态)。"""
+    """terminal_id → (model, brand, ov, darkMode), 稳定确定性(无随机数状态)。
+
+    ov/darkMode 已不进 UA(线上样本无此字段), 保留返回值供兼容。"""
     digest = hashlib.sha256(("dsh-ua:" + (terminal_id or "")).encode()).hexdigest()
     model, brand, ovs = _DEVICE_POOL[int(digest[:8], 16) % len(_DEVICE_POOL)]
     ov = ovs[int(digest[8:16], 16) % len(ovs)]
@@ -165,37 +181,29 @@ def _pick_device_profile(terminal_id: str) -> tuple[str, str, int, str]:
 
 
 def _build_client_ua(terminal_id: str = "") -> str:
-    """Base64(JSON) user-agent, same shape as the Android client.
+    """Base64(JSON) user-agent — 按线上客户端样本逐字段复刻。
 
-    终端标识必须独立于手机 App(避免与用户手机 terminalId 冲突 → 顶号掉线),
-    特征值按真机 Android App 对齐(R17/android 类型无真机校验):
-      - terminalId: **16 hex 小写**(真机安卓 = Settings.Secure ANDROID_ID,
-        DEX s7/k#g() 源头;清单中安卓真机全为 16hex:18ee5ef24011a454),
-        由持久化 terminal_id 确定性派生(_real_android_id),同安装恒定;
-        旧 UUID 时代安装平滑迁移(同一 terminal_id → 同一 16hex);
-      - terminalModel/Brand/clientOV/darkMode: 从 _DEVICE_POOL 真机特征池按
-        terminal_id 确定性派生(多品牌混合, 同安装恒定/跨安装分散,
-        避免单一 UA 特征被服务端聚类标记);
-    PC 特征(此前 PC-Client/HA-Integration-Box)会话待遇差、频繁失效
-    (mobile_client.py 结论),故弃用。
+    样本字段: clientType=phone / clientVersion=V10.2.2 / clientOV="Android 14"
+    / clientOS=Android(大写) / language=zh_CN(下划线) / timezoneOffset=28800(秒)
+    / ttid=32hex无连字符 / 无country / 无darkMode。
+    终端标识独立于手机 App(避免顶号), terminalId 16hex 派生(_real_android_id),
+    机型/品牌从设备特征池按 terminal_id 确定性派生。
     """
     tid = _real_android_id(terminal_id or str(_uuid.uuid4()).upper())
-    model, brand, ov, dark = _pick_device_profile(tid)
+    model, brand, _ov, _dark = _pick_device_profile(tid)
     data = {
-        "clientType": "android",
-        "clientVersion": "10.2.2.0831",
-        "clientOV": str(ov),
-        "clientOS": "android",
+        "clientType": "phone",
+        "clientVersion": "V10.2.2",
+        "clientOV": "Android 14",
+        "clientOS": "Android",
         "terminalModel": model,
         "terminalId": tid,
         "appid": APP_ID,
         "project": PROJECT,
-        "language": "zh-CN",
+        "language": "zh_CN",
         "clientProtocolVersion": PROTO_VER,
-        "timezoneOffset": "480",
+        "timezoneOffset": "28800",
         "terminalBrand": brand,
-        "country": "CN",
-        "darkMode": dark,
         "ttid": _real_ttid(terminal_id),
     }
     return _b64(json.dumps(data, separators=(",", ":")).encode())
@@ -215,7 +223,7 @@ def _sign_payload(
 ):
     """Build the x-pcs request headers for one request.
 
-    apiver/Content-Type 分域(接口测试报告 R13):
+    apiver/Content-Type 分域:
       用户/设备域  apiver=191204, charset=utf-8
       消息域        apiver=V10.2.2, charset=UTF-8(iot.message.* / 服务端生成类)
     terminal_id: 集成固定终端标识(避免与手机 App 同终端而互相顶号)
@@ -348,7 +356,16 @@ class ImouClient:
         }
 
     async def async_login(self, username: str, password: str) -> dict:
-        """账号密码登录 -> {sessionId, token, username, userId, host}."""
+        """账号密码登录 -> {sessionId, token, username, userId, host}.
+
+        GetToken 必须携带【自有持久 sid】(有登录史的 sid)。
+        sid 从 config entry 持久化加载(首次为空则用 terminal_id 派生的固定值,
+        首次 SMSLogin 激活后该 sid 即拥有登录史 → 之后密码 GetToken 永远直通)。
+        响应形态:
+          10000+token  → 签发成功(账号无活跃 token 或 sid 带续期标记)
+          10000+failNum → 账号已有活跃 token, 不重复签发(token 仍活, 非错误)
+          12114        → GT4 拦截(见 async_login_evergreen 的 GT4 分支)
+        """
         body = json.dumps(
             {"data": {"gpsInfo": {"latitude": 0, "longitude": 0}}},
             separators=(",", ":"),
@@ -357,14 +374,128 @@ class ImouClient:
         key2 = _sha256_hex_lower(_sha256_hex_lower(password))
         headers = _sign_payload(
             "POST", API_PREFIX + "user.account.GetToken", body,
-            "account\\" + username, key1, key2, terminal_id=self.terminal_id,
+            "account\\" + username, key1, key2, session_id=self.session_id or None,
+            terminal_id=self.terminal_id,
         )
         data = await self._http_post(self.api_host, API_PREFIX + "user.account.GetToken",
                                      body, headers)
         self.username = username
         self.password = password
+        # 10000+无token(仅 failNum) = 账号已有活跃 token — 保持现会话不动,
+        # 若本地无会话则视为需要 GT4/短信流程, 由调用方(async_login_evergreen)处理。
+        if data and "token" not in data and "sessionId" not in data:
+            raise ImouAPIError(10001, "token-alive-no-reissue: " + json.dumps(data)[:120])
         # _http_post 已解包 data 层,这里 data 即业务对象 {sessionId, token, ...}
         return await self._apply_login_response(username, data)
+
+    async def async_login_evergreen(self) -> dict:
+        """EVERGREEN 自主续期链(集成端默认登录路径, 零人工).
+
+        前提: 本 sid 已完成过一次 SMSLogin(有登录史, 配置流程做一次即可)。
+        流程: 密码 GetToken(带自有 sid) → 10000+token → Login(激活) → 业务。
+        12114(GT4) 分支: 抛出 ImouAPIError(12114, verifyToken=...), 由
+        config_flow 引导用户完成本地滑块 → CheckGeeTest4 → 重试。
+        """
+        if not self.username or not self.password:
+            raise ImouAPIError(11010, "evergreen requires stored credentials")
+        try:
+            return await self.async_login(self.username, self.password)
+        except ImouAPIError as err:
+            if err.code == 12114:
+                # 附带 verifyToken 供 gt4.html/监听器使用
+                _LOGGER.warning("GT4 challenge required (risk-state); run gt4.html slider")
+            elif err.code == 10001:
+                _LOGGER.info("Account already has a live token elsewhere; session kept")
+            raise
+
+    # ------------------------------------------------------- GT4
+    async def async_check_geetest4(
+        self, lot_number: str, captcha_output: str, pass_token: str,
+        gen_time: str, usage: str = "SMSLogin", verify_token: str = "",
+        account_enc: Optional[str] = None,
+    ) -> dict:
+        """GT4 四元组校验 (common.validcode.CheckGeeTest4).
+
+        身份 = default\\OEM_AK, 签名密钥 = md5hex(SK)/sha256hex(SK) 单哈希
+        (与密码路径的双哈希不同!)。响应 data.token = GT4 通过凭证。
+        四元组来自 gt4.html 网页滑块(用户手动) → 本地监听器(gt4_helper)。
+        """
+        enc = account_enc or _enc_account(self.username)
+        payload = {
+            "verifyToken": verify_token,
+            "usage": usage,
+            "passToken": pass_token,
+            "captchaMetaData": "",
+            "lotNumber": lot_number,
+            "genTime": str(gen_time),
+            "captchaId": GT4_CAPTCHA_ID,
+            "account": enc,
+            "captchaOutput": captcha_output,
+            "isEncrypt": True,
+        }
+        body = json.dumps({"data": payload}, separators=(",", ":")).encode()
+        key1 = _md5_hex_lower(OEM_SK)
+        key2 = _sha256_hex_lower(OEM_SK)
+        headers = _sign_payload(
+            "POST", API_PREFIX + "common.validcode.CheckGeeTest4", body,
+            "default\\" + OEM_AK, key1, key2, session_id=self.session_id or None,
+            terminal_id=self.terminal_id,
+        )
+        return await self._http_post(self.api_host,
+                                     API_PREFIX + "common.validcode.CheckGeeTest4",
+                                     body, headers)
+
+    async def async_send_sms_code_gt4(
+        self, usage: str = "SMSLogin", account_enc: Optional[str] = None,
+    ) -> dict:
+        """GT4 通过后重发短信验证码(default 前缀 AK 身份).
+
+        账号风险态: usage=Login 的短信会被服务端静默丢弃(响应 10000 但不发),
+        必须走 usage=SMSLogin(需先过 GT4)。
+        """
+        enc = account_enc or _enc_account(self.username)
+        payload = {"areaCode": "", "usage": usage, "type": "phone",
+                   "account": enc, "isEncrypt": True}
+        body = json.dumps({"data": payload}, separators=(",", ":")).encode()
+        key1 = _md5_hex_lower(OEM_SK)
+        key2 = _sha256_hex_lower(OEM_SK)
+        headers = _sign_payload(
+            "POST", API_PREFIX + "common.validcode.GetValidCode", body,
+            "default\\" + OEM_AK, key1, key2, session_id=self.session_id or None,
+            terminal_id=self.terminal_id,
+        )
+        return await self._http_post(self.api_host,
+                                     API_PREFIX + "common.validcode.GetValidCode",
+                                     body, headers)
+
+    async def async_get_token_by_sms_ak(
+        self, valid_code: str, account_enc: Optional[str] = None,
+    ) -> dict:
+        """短信码换 token(default 前缀 AK 身份) → _apply_login_response 收尾.
+
+        关键: 调用前 self.session_id 必须是【自有 sid】; 首次绑定时
+        该 sid 无登录史, 签发的 token 未激活 — 必须立刻 Login 激活一次
+        (_apply_login_response 内置 user.account.Login), 之后该 sid 永久
+        拥有登录史 → 密码 GetToken 永远直通(EVERGREEN)。
+        """
+        enc = account_enc or _enc_account(self.username)
+        body = json.dumps(
+            {"data": {"validCode": valid_code, "account": enc, "isEncrypt": True}},
+            separators=(",", ":"),
+        ).encode()
+        key1 = _md5_hex_lower(OEM_SK)
+        key2 = _sha256_hex_lower(OEM_SK)
+        headers = _sign_payload(
+            "POST", API_PREFIX + "user.account.GetTokenBySMS", body,
+            "default\\" + OEM_AK, key1, key2, session_id=self.session_id or None,
+            terminal_id=self.terminal_id,
+        )
+        data = await self._http_post(self.api_host,
+                                     API_PREFIX + "user.account.GetTokenBySMS",
+                                     body, headers)
+        self.username = self.username or ""
+        return await self._apply_login_response(self.username, data)
+
 
     # ------------------------------------------------------- 短信验证码登录
     async def async_send_sms_code(
@@ -375,11 +506,11 @@ class ImouClient:
         country: str = "CN",
         is_encrypt: bool = False,
     ) -> dict:
-        """发送短信验证码 (common.validcode.GetValidCode, 人机验证接口对接指南 §1).
+        """发送短信验证码 (common.validcode.GetValidCode).
 
-        依据指南:usage 与业务一一对应(登录=Login / 短信登录=SMSLogin /
-        生成临时密码=GenerateSnapkey);App 真机 isEncrypt=true(账号 AES-GCM 加密,
-        见 n40/h.s()),不想处理加密可先传明文 isEncrypt:false 实测(服务端策略为准)。
+        usage 与业务一一对应(登录=Login / 短信登录=SMSLogin /
+        生成临时密码=GenerateSnapkey);线上客户端 isEncrypt=true(账号 AES-GCM 加密),
+        不想处理加密可先传明文 isEncrypt:false(以服务端策略为准)。
         """
         return await self.async_post(
             "common.validcode.GetValidCode",
@@ -397,7 +528,7 @@ class ImouClient:
         )
 
     async def async_login_sms(self, account: str, valid_code: str, area_code: str = "") -> dict:
-        """短信验证码登录 (user.account.GetTokenBySMS, App 源码取证).
+        """短信验证码登录 (user.account.GetTokenBySMS).
 
         请求: {account, areaCode, validCode};响应与 GetToken 同构
         ({sessionId, token, username, entryUrlV2, newUser}) → 同一套密钥切换。
@@ -423,7 +554,7 @@ class ImouClient:
     async def async_check_valid_code(
         self, account: str, valid_code: str, usage: str = "SMSLogin", type_: str = "phone"
     ) -> dict:
-        """校验验证码 → accessToken (common.validcode.CheckValidCode, 指南 §1.2).
+        """校验验证码 → accessToken (common.validcode.CheckValidCode).
 
         一次校验一用(用于后续单笔业务);返回 data.accessToken。
         """
@@ -439,25 +570,21 @@ class ImouClient:
         )
 
     async def async_granting_credit(
-        self, account: str, sms_code: str, type_: str = "grantingCredit",
-        is_encrypt: bool = True,
+        self, account: str, sms_code: str, type_: str = "phone",
+        is_encrypt: bool = True, area_code: str = "",
     ) -> dict:
-        """终端授权提交 (user.account.GrantingCredit, 终端绑定逻辑分析.md §一).
+        """终端授权提交 (user.account.GrantingCredit, 线上协议校准).
 
-        正确链(2026-09-03 分析):
-          GetValidCode(usage=GrantingCredit) → 短信码 → **CheckValidCode →
-          {accessToken}** → GrantingCredit.validCode = **accessToken**(非短信码!)
-        实测:直接拿短信码提交 → 11001 bad request(鉴权未提前校验)。
-        本方法自动完成中间步:短信码 → accessToken → 授权提交。
+        线上协议:
+          ① GetValidCode {usage:"GrantingCredit", type:"phone",
+                          account:AES-GCM 加密, areaCode:""} → 10000
+          ② GrantingCredit {validCode:<短信原码>, type:"phone",
+                            account:加密, isEncrypt:true} → 10000
+        ★ 无 CheckValidCode 中间步:validCode 直接传短信验证码原码;type 固定
+          "phone"(非 grantingCredit)——旧链(accessToken/grantingCredit)实测 15000。
+        触发场景:phone 型新终端 GetToken 被 12112 拦截(终端管理开启),App 弹
+        验证码框走此链完成绑定;GetTokenBySMS 可复用同一码完成登录。
         """
-        # 1) 短信码 → accessToken(一次一用)
-        checked = await self.async_check_valid_code(
-            account, sms_code, usage="GrantingCredit"
-        )
-        access_token = (checked or {}).get("accessToken")
-        if not access_token:
-            raise ImouAPIError(-1, "no accessToken from CheckValidCode")
-        # 2) 授权提交(账号加密,App 同款)
         enc_account = _enc_account(account) if is_encrypt else account
         if is_encrypt and enc_account is None:
             _LOGGER.warning("未安装 pycryptodome,终端授权改用明文提交(可能被服务端拒绝)")
@@ -465,28 +592,8 @@ class ImouClient:
         return await self.async_post(
             "user.account.GrantingCredit",
             {"account": enc_account, "isEncrypt": is_encrypt, "type": type_,
-             "validCode": access_token},
+             "validCode": sms_code},
         )
-        """短信验证码登录 (user.account.GetTokenBySMS, App 源码取证).
-
-        请求: {account, areaCode, validCode};响应与 GetToken 同构
-        ({sessionId, token, username, entryUrlV2, newUser}) → 同一套密钥切换。
-        """
-        body = json.dumps(
-            {"data": {"account": account, "areaCode": area_code, "validCode": valid_code}},
-            separators=(",", ":"),
-        ).encode()
-        key1 = _md5_hex_lower(_md5_hex_lower(valid_code))
-        key2 = _sha256_hex_lower(_sha256_hex_lower(valid_code))
-        headers = _sign_payload(
-            "POST", API_PREFIX + "user.account.GetTokenBySMS", body,
-            "account\\" + account, key1, key2, terminal_id=self.terminal_id,
-        )
-        data = await self._http_post(self.api_host, API_PREFIX + "user.account.GetTokenBySMS",
-                                     body, headers)
-        self.username = account
-        self.password = ""  # 短信登录无密码,自动重登不可用(需重新配置)
-        return await self._apply_login_response(account, data)
 
     async def async_ensure_session(self) -> None:
         """Re-login when the stored session is missing/expired."""
@@ -549,7 +656,7 @@ class ImouClient:
     ) -> dict:
         """Signed POST to `/pcs/v1/{api_name}` with session headers.
 
-        apiver/content_type 分域(R13):用户/设备域默认 191204+utf-8;
+        apiver/content_type 分域:用户/设备域默认 191204+utf-8;
         消息域(iot.message.*/服务端生成类)调用方传 "V10.2.2"+"charset=UTF-8"。
         """
         await self.async_ensure_session()
@@ -571,7 +678,7 @@ class ImouClient:
                 )
             raise
 
-    # 消息域常量(接口测试报告 R13)
+    # 消息域常量
     MSG_APIVER = "V10.2.2"
     MSG_CONTENT_TYPE = "application/json; charset=UTF-8"
 
@@ -626,7 +733,7 @@ class ImouClient:
     async def async_get_device_info(
         self, device_id: str, product_id: str, channel_id: str = "0"
     ) -> dict:
-        """单设备完整详情 (device.info.BasicInfoGet, 抓包验证)."""
+        """单设备完整详情 (device.info.BasicInfoGet)."""
         data = await self.async_post(
             "device.info.BasicInfoGet",
             {"productId": product_id, "deviceId": device_id, "channelId": channel_id},
@@ -707,7 +814,7 @@ class ImouClient:
     ) -> dict:
         """Call iot.control.SetService; returns outputData keyed by identifier.
 
-        线上协议(2026-09-03 抓包/实测):请求体必须用型号 ref 编码 ——
+        线上协议(实测):请求体必须用型号 ref 编码 ——
         `service` 字段为 ref 数字(remoteOpenDoor -> "26600"),inputData 键
         亦为 ref,鉴权字段名为 `client`({"authId": ...})。发送 identifier
         字符串(如 serviceName:"remoteOpenDoor")会被服务端以 11001 拒绝。
@@ -754,7 +861,7 @@ class ImouClient:
     ) -> str:
         """云端取流地址 (things.media.GetRealTransferStreamUrl, apiver=191204).
 
-        ★ 该请求兼具唤醒语义: 休眠设备收到后 ~5s 上线(WI-007)。
+        ★ 该请求兼具唤醒语义: 休眠设备收到后 ~5s 上线。
         仅主码流 streamId='1' 在中继有数据(子码流返回 SDP 后零包)。
         返回 resource(TCP:11004); TLS 端口 = 该端口 + 500(与 tls_resource 一致)。
         """
@@ -822,14 +929,14 @@ class ImouClient:
         return data
 
     # ------------------------------------------- 云消息 API(设备休眠也可用)
-    # 说明:临时密码相关接口均走「消息域」(apiver=V10.2.2, charset=UTF-8, 测试报告 R13),
+    # 说明:临时密码相关接口均走「消息域」(apiver=V10.2.2, charset=UTF-8),
     # 且**不使用** iot.control.SetService(CreateDeviceSnapkey)——老接口可能触发
     # 身份验证码/风控(热更分析:SetService 前置 GetValidCode/CheckValidCode)。
-    # 按 R14:keyId/tempKey 由客户端生成,经 SmartLockSecretAdd 直接登记(实测 10000)。
+    # keyId/tempKey 由客户端生成,经 SmartLockSecretAdd 直接登记(实测 10000)。
     async def async_smart_lock_secret_list(
         self, device_id: str, product_id: str, types: int = 3
     ) -> dict:
-        """临时密码分组列表 (iot.message.SmartLockSecretListV2, 抓包验证).
+        """临时密码分组列表 (iot.message.SmartLockSecretListV2).
 
         types=3 → 临时密钥分组;返回 secretGroups[]。
         """
@@ -852,7 +959,7 @@ class ImouClient:
     ) -> dict:
         """添加临时密码 (iot.message.SmartLockSecretAdd; 消息域 apiver=V10.2.2).
 
-        R14 合规:keyId 随机、tempKey 8 位、createTime/expiredTime 必须真实 epoch 秒、
+        服务端约束:keyId 随机、tempKey 8 位、createTime/expiredTime 必须真实 epoch 秒、
         type=3、usagePeriod 周位图(127=整周)。
         """
         import random as _random
@@ -889,7 +996,7 @@ class ImouClient:
     ) -> dict:
         """删除临时密码 (iot.message.SmartLockSecretDelete; 消息域).
 
-        R14: 删除需尽量全字段(仅 state=1 的条目真正移除)。
+        删除需尽量全字段(仅 state=1 的条目真正移除)。
         """
         payload = {"productId": product_id, "deviceId": device_id, "keyId": key_id}
         if extra:
@@ -905,7 +1012,7 @@ class ImouClient:
         begin_alarm_id: str = "-1",
         end_alarm_id: int = -1,
     ) -> dict:
-        """混合告警 (cloud.message.GetDeviceAlarmMixMessage, 抓包验证 code=10000).
+        """混合告警 (cloud.message.GetDeviceAlarmMixMessage, 实测 code=10000).
 
         设备休眠时云侧消息照常返回;返回 data.alarms[](alarmId/labelType/refId/time/message)。
         """

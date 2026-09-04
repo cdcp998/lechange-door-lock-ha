@@ -318,7 +318,7 @@ async def async_set_voice_reply(call: ServiceCall):
 
 
 async def async_create_snapkey(call: ServiceCall):
-    """生成临时密码:抓包验证的云消息 API (设备休眠也可用)."""
+    """生成临时密码:云消息 API (设备休眠也可用)."""
     hass, device_id = call.hass, call.data["device_id"]
     coordinator = _get_coordinator(hass, device_id)
     if not coordinator:
@@ -401,7 +401,7 @@ async def async_send_sms_code(call: ServiceCall):
 
 
 async def async_authorize_terminal(call: ServiceCall):
-    """终端授权提交 (user.account.GrantingCredit, App 源码取证 + 实测).
+    """终端授权提交 (user.account.GrantingCredit).
 
     实测(2026-09-03):发送验证码(usage=GrantingCredit)10000 ✅;
     提交 → 账号未开终端管理=11001 bad request;App 专用未登录上下文=11010/11001。
@@ -458,7 +458,7 @@ async def async_call_service(call: ServiceCall):
     )
 
 
-# ------------------------------------------------------------- 媒体 (WI-005)
+# ------------------------------------------------------------- 媒体
 def _save_www_image(hass: HomeAssistant, filename: str, data: bytes) -> str | None:
     """保存图片到 <config>/www/lechange_door_lock/, 返回 /local/ URL;失败返回 None。"""
     import os

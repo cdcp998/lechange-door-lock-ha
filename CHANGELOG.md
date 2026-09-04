@@ -10,9 +10,49 @@
 
 ---
 
+## [v1.6.0] - 2026-09-04
+
+### 会话信任模型
+- **sid 持久**:sessionId 由终端生成后持久保存,每次登录复用同一 sid;token 每次登录签发。
+- **token 信任度继承来源 sid 的登录历史**:有登录史(至少一次 Login 10000)的 sid
+  签发的 token 直接激活;无登录史的 sid 签发的 token 保持未激活,登录与业务调用均
+  返回 12001。首次短信登录完成激活后,该 sid 即永久具备续期资格。
+- **GetToken 签发新 token 的条件**:账号当前无活跃 token,或 sid 携带 12002 续期标记;
+  否则返回 10000 且响应不带 token(failNum 字段为当日累计错误密码次数,每日 0 点清空,
+  与 token 签发无关)。集成侧将"10000 无 token"识别为保持现有会话,不再误判为登录失败。
+- **单账号单活跃 token**:各端登录互相顶替,被顶一端由客户端静默重登。集成侧在业务
+  返回 12001/12002 时自动走密码续期链,与手机 App 共存语义明确为"后登者顶前者,被顶者自愈"。
+
+### 新增(登录链同步,零人工续期)
+- **自主续期登录链**(`async_login_evergreen`):密码 GetToken(携带自有 sid)→ Login 激活
+  → 业务恢复,全程两个请求,无需验证码。首次绑定(短信 + GT4 滑块)完成后日常运行不再
+  需要任何人工介入。
+- **GT4 本地滑块验证**(gt4_helper.py):账号风险态/新终端首登遇 12114 时,配置流程自动
+  生成滑块页面,挂在 **HA 自身 HTTP 端口**(容器部署无需额外端口映射):
+  - 页面:`GET /api/lechange/gt4/slides`
+  - 回传:`POST /api/lechange/gt4/tuple`
+  滑块通过后自动完成 CheckGeeTest4 → 重发短信 → 回到验证码输入步骤;不再要求
+  "去乐橙 App 完成验证"。
+- **AK 身份接口**:CheckGeeTest4 / GetValidCode / GetTokenBySMS 支持 default 前缀 AK
+  身份(签名密钥为 SK 单哈希,与密码路径的双哈希区分)。OEM AK/SK 为厂商接入凭据,
+  改由环境变量提供(`LECHANGE_OEM_AK` / `LECHANGE_OEM_SK`),不再随源码分发。
+- 错误码扩展:`12001`(token 未激活)纳入认证失效码表;新增 `12114`(需 GT4)、
+  `12112`(需终端授信)定向处理。
+
+### 修复(终端授权链线上协议校准)
+- **GrantingCredit 按线上协议校准**:完整绑定链实测
+  (GetToken 12112 → GetValidCode(GrantingCredit) → **GrantingCredit** → GetTokenBySMS),
+  确认 `validCode` 直接传**短信验证码原码**、`type` 固定 `"phone"`、`areaCode` 空串,
+  **无 CheckValidCode→accessToken 中间步**(旧链实测 15000 的真因)。
+- 单测同步:授权链断言改为原码直传 + type=phone + 单次调用。
+
+### 测试
+- 单元测试扩展至 **153 例**(新增 17 例:AK 身份与 SK 签名重算、GetToken sid 头透传、
+  "10000 无 token"会话保护、12114 上抛、滑块页面占位符/UA 注入、监听器四元组分发)。
+
 ## [v1.5.0] - 2026-09-04
 
-### ✨ 媒体接入 v1.5.0 (WI-005, 2026-09-04)
+### ✨ 媒体接入 v1.5.0 (2026-09-04)
 - **云端实时预览**(`record_preview`): RTSV1 取流录制, 默认主码流, H265 优先;
   支持 OSD(时间戳左上 + 通道名右下, 逐秒真实时间, 可关)。
 - **门外截图**: camera 快照 + `doorfront_snapshot` 服务; 双摄组合(左右/上下/单摄),
@@ -21,8 +61,8 @@
 - **本地通道地址**: `channel_hosts`; LAN `snapshot.cgi` 优先, 设备不在网自动回退云端。
 - **两套密码**: 配置流采集安全码(必填)+设备密码(可选); 安全码=告警图, 设备密码=流帧。
 - **OSD 字体**: 插件内置思源黑体 SC(子集 3.4MB), 截图/预览同字体, 不依赖系统字库。
-- **UA 真机特征池**: 19 款混合品牌机型, 按 terminal_id 确定性派生。
-- **MQTT 实时通道**(WI-003): 凭据 `client_v2/auth/get`(apiver 6550) + TLS 8883
+- **UA 设备特征池**: 19 款混合品牌机型, 按 terminal_id 确定性派生。
+- **MQTT 实时通道**: 凭据 `client_v2/auth/get`(apiver 6550) + TLS 8883
   (内置 CA) + `iot_request/iot_response` 往返; **控制 MQTT 优先 → 云 API 兜底**,
   属性推送实时更新实体; 断线自动重试, 不影响轮询。
 - **ffmpeg**: 系统二进制依赖, 无 imageio 回退。
@@ -37,29 +77,25 @@
   重登行为断言 12002→GetToken→重试(2 次重登路径),83 例全通过。
 
 ### 修复(终端特征迁移)
-- **client-ua 迁移为真机安卓特征**(接口测试报告 R17):`clientType=android` 保持,
-  `terminalModel/terminalBrand` 由 PC 占位值(HA-Integration-Box/Generic)改为真机值
-  (**SM-S921B/samsung**),`clientOV` 对齐 Android 14(34)——phone 型有真机校验(12112)
-  不可模拟,PC 特征终端会话待遇差、易频繁失效,真机安卓特征为可持续方案。
+- **client-ua 迁移为线上安卓特征**:`clientType=android` 保持,
+  `terminalModel/terminalBrand` 由 PC 占位值(HA-Integration-Box/Generic)改为线上客户端值
+  (**SM-S921B/samsung**),`clientOV` 对齐 Android 14(34)——phone 型有服务端校验(12112)
+  不可模拟,PC 特征终端会话待遇差、易频繁失效,线上安卓特征为可持续方案。
 - **terminalId 迁移为 App 同款标准 UUID**(大写带连字符):coordinator 启动时检测旧
   `lechange-hass-*` 格式一次性升级并持久化,保持"一台终端一份 ID"语义(不膨胀终端管理列表)。
 - 单元测试新增 client-ua 终端特征组(83 例,含签名串参与性断言)。
-- 实测:`API/scripts/android_session_probe.py`(真机 UA 登录 + 30s 只读心跳,
+- 实测:线上 UA 登录 + 30s 只读心跳,
   user.account.Login / device.list.DeviceBasicInfoQueryV2 / cloud.message.GetDeviceAlarmMixMessage
-  三路全 10000;`loop` 模式统计会话存活时长,会话失效自动重登)。
-### Todo
-- **持久化登录状态** 即完成对设备mac的绑定授信操作.
+  三路全 10000;循环模式统计会话存活时长,会话失效自动重登。
 
 ## [1.4.0] - 2026-09-03
 
-### 依据(新分析文件,仅存本地不公开)
-- 热更接口分析(运行时 JS bundle):`hotupdate_api_list.json` / `hotupdate_api_usage.txt` /
-  `热更接口功能与用法.md` / `接口测试报告.md`(R1-R15 避雷清单与可信度分级 A/B/C)/
-  `门锁功能全分析.md`;抓包证据 `capture/flow.jsonl`(103 条记录/32 API)+ 复现 addon。
+### 依据(本地分析,不随仓库分发)
+- 客户端接口清单与运行时行为分析;流量样本 103 条记录/32 API。
 
 ### 新增(短信验证码登录)
-- 配置向导支持**两种登录方式**:**账号密码** / **短信验证码**(App 源码取证:
-  `user.account.GetTokenBySMS` {account, areaCode, validCode},响应与 GetToken 同构,
+- 配置向导支持**两种登录方式**:**账号密码** / **短信验证码**
+  (`user.account.GetTokenBySMS` {account, areaCode, validCode},响应与 GetToken 同构,
   登录后同一套密钥切换 md5(token)/sha256(token))。
 - 短信流程:输入账号 → 提示在乐橙 App 获取验证码(集成 best-effort 尝试自动发送
   `common.validcode.GetValidCode` {type:"phone", usage:"SMSLogin"},未登录发送实测被
@@ -68,20 +104,20 @@
   引导改用短信登录)与 `captcha_needed`(2033/2036/11006/11007/11012/12000 风控)。
 - **人机验证(极验 GT4)**:若连续输错密码或触发了风控，登录会失败（需在 乐橙 App  中完成验证后再试）。
 
-### 修复(按抓包/测试报告验证)
+### 修复(按实测验证)
 - **临时密码改走真实 App 云消息 API**:`iot.message.SmartLockSecretAdd`(生成)/
   `SmartLockSecretListV2`(分组列表)/新增 **`delete_snapkey`**(`SmartLockSecretDelete`)。
   - **不使用 `iot.control.SetService`(CreateDeviceSnapkey)生成**——老接口及前置身份验证
     (GetValidCode/CheckValidCode)会触发短信验证码;改为客户端自产 keyId/tempKey
     (8 位数字,keyId 随机,createTime/expiredTime 真实 epoch)直接登记,
     **设备休眠可用、不触发验证码**(实测 10000)。
-  - `usagePeriod` 按抓包格式 `星期位掩码-起T0000Z-止T2359Z` 构建。
+  - `usagePeriod` 按 `星期位掩码-起T0000Z-止T2359Z` 格式构建。
 - **消息域 apiver 分域(R13)**:`iot.message.*`/临时密码 = **`V10.2.2` + `charset=UTF-8`**,
   已实测可用;用户/设备域保持 `191204` + `utf-8`。
-- **云侧告警接入**:`cloud.message.GetDeviceAlarmMixMessage`(抓包验证 payload,设备休眠
+- **云侧告警接入**:`cloud.message.GetDeviceAlarmMixMessage`(实测 payload,设备休眠
   照常返回)→ 每轮询检测新告警触发 `lechange_door_lock_event`(`type: alarm`),
   新增「最新告警」传感器;首轮只建基线不刷历史。
-- 单设备详情改用 `device.info.BasicInfoGet`(抓包验证),失败回退列表接口。
+- 单设备详情改用 `device.info.BasicInfoGet`(实测),失败回退列表接口。
 
 ### 其他
 - **「唤醒设备」改为「获取门外截图」**:原 SetProperties 唤醒对休眠设备无效;

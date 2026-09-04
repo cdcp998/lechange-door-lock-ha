@@ -1,6 +1,6 @@
 """Constants for the LeChange (Imou) Door Lock integration.
 
-Based on the reverse-engineered client API (see API/report):
+Client-side cloud API endpoints:
   - login:  POST /pcs/v1/user.account.GetToken  (x-pcs signing)
   - devices: device.list.BasicList / device.list.DeviceBasicInfoQueryV2
   - model:   iot.manager.QueryModelInfo (identifier <-> ref mapping)
@@ -41,7 +41,7 @@ CONF_RTSP_PASSWORD = "rtsp_password"
 CONF_RTSP_URL = "rtsp_url"            # 完整 URL 覆盖(如 go2rtc 中转地址)
 CONF_RTSP_SUBTYPE = "rtsp_subtype"    # 0 主码流 / 1 子码流
 
-# --- 设备密码体系(WI-008 两套密码: 同一 KDF 的两个代次) ----------------------
+# --- 设备密码体系(两套密码: 同一 KDF 的两个代次) ----------------------------
 # 安全码 = 设备标签出厂值(设备密码的出厂初始值) → 历史告警图解密(出厂代)
 CONF_SECURITY_CODE = "security_code"
 # 设备密码 = App"修改设备密码"后的当前值 → 实时流帧解密(当前代);
@@ -58,7 +58,7 @@ CONF_CHANNEL_HOSTS = "channel_hosts"          # JSON dict: {"0": "192.168.1.10:5
 CONF_SNAPSHOT_MIN_INTERVAL = "snapshot_min_interval"  # 门外截图最小间隔(秒)
 DEFAULT_SNAPSHOT_MIN_INTERVAL = 60   # 电池设备: 默认 60s 节流(取流自带唤醒)
 CONF_SNAPSHOT_STREAM_ID = "snapshot_stream_id"        # 取流码流: '1'主(默认)/'2'子
-DEFAULT_SNAPSHOT_STREAM_ID = "1"     # ★ 仅主码流在中继有数据(WI-007), 子码流零包
+DEFAULT_SNAPSHOT_STREAM_ID = "1"     # ★ 仅主码流在中继有数据, 子码流零包
 CONF_SNAPSHOT_OSD = "snapshot_osd"   # 门外截图 OSD(时间戳+通道名; 可关)
 DEFAULT_SNAPSHOT_OSD = True          # ★ 默认开; 用户可关
 CONF_SNAPSHOT_OSD_ALPHA = "snapshot_osd_alpha"        # OSD 底色不透明度 0-255
@@ -122,20 +122,39 @@ SERVICE_DELETE_SNAPKEY = "delete_snapkey"
 SERVICE_SEND_SMS_CODE = "send_sms_code"
 SERVICE_AUTHORIZE_TERMINAL = "authorize_terminal"
 
+# --- GT4 网页滑块助手 --------------------------------------------------------
+# 滑块页由 gt4_helper 生成并挂在 HA 自身 HTTP 端口(config_flow 使用时缓存),
+# 用户手动完成滑块后页面 POST 四元组回 HA;gt4_helper 负责校验+重试登录。
+GT4_HTML_FILENAME = "gt4.html"
+GT4_LISTEN_PORT = 8765
+GT4_LISTEN_PATH = "/gt4"
+
 # --- events ---------------------------------------------------------------
 EVENT_PREFIX = f"{DOMAIN}_event"
 
-# --- error codes (App 内映射) ----------------------------------------------
+# --- error codes (客户端行为映射) --------------------------------------------
 SUCCESS_CODES = {0, 200, 1000, 10000}
 # 认证失败/登录态失效 → 重新登录。12002 = 签名密钥/token 被作废(实测:同账号
-# 任意端 GetToken 新登录会作废旧 token,单 token 策略;2026-09-03 判别实验:
+# 任意端 GetToken 新登录会作废旧 token,单 token 策略;判别实验:
 # 错误密钥→12002,错误/缺失 sessionId→10000,故 12002 是"重登"的可靠信号)
-AUTH_FAIL_CODES = {3, 13, 2027, 11010, 12002}
+# 12001 = token 未激活(来源 sid 无登录史);12002 = 曾激活已失效。
+AUTH_FAIL_CODES = {3, 13, 2027, 11010, 12001, 12002}
 ACCOUNT_LOCKED_CODES = {2008, 100001, 22005}
 DEVICE_OFFLINE_CODES = {10003}             # 设备休眠/离线/不可达
 RATE_LIMIT_CODES = {2029, 2030}
 
-# --- model property identifiers (SKG8J5R0 / R10-M0X) ------------------------
+# --- GT4 / 终端信任 -----------------------------------------------------------
+# GT4 captchaId 为乐橙客户端通用公开值;OEM AK/SK 为设备厂商接入凭据,
+# 不随源码分发 — 使用者通过环境变量或 options 提供(留空则 GT4 校验不可用)。
+GT4_CAPTCHA_ID = os.environ.get("LECHANGE_GT4_CAPTCHA_ID", "27e3ebaf32906618c3eb8bc69035903a")
+OEM_AK = os.environ.get("LECHANGE_OEM_AK", "")
+OEM_SK = os.environ.get("LECHANGE_OEM_SK", "")
+# 12114 = 风险态 GT4 拦截(captchaData.verifyToken);
+# 12112 = 终端绑定校验(新终端首登, 走授信链 GrantingCredit)。
+NEED_GT4_CODES = {12114}
+NEED_CREDIT_CODES = {12112}
+
+# --- model property identifiers ---------------------------------------------
 PROP_LOCK_STATUS = "doorLockStatus"      # 0 门已锁 / 1 门未锁 / 2 未知
 PROP_LOCK_STATE = "doorLockState"        # 0 关 / 1 开 (门物理状态)
 PROP_POWER_STATE = "powerState"          # 0 正常 / 1 省电 / 2 超级省电

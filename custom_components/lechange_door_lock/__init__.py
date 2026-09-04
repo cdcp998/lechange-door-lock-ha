@@ -1,7 +1,7 @@
 """LeChange (Imou) door lock integration.
 
-Uses the client-side cloud API captured from the official app
-(see API/report) instead of the slow-to-update Open Platform API.
+Uses the client-side cloud API of the official mobile clients
+instead of the slow-to-update Open Platform API.
 """
 
 import logging
@@ -27,6 +27,18 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the integration (called by HA with configuration.yaml)."""
     hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN].setdefault("gt4_listeners", {})
+
+    # GT4 本地滑块: 注册 HA 原生 view(挂在 HA 自身 HTTP 端口, 容器部署零配置).
+    # 页面: GET /api/lechange/gt4/slides (config_flow 生成时缓存 HTML)
+    # 回传: POST /api/lechange/gt4/tuple (requires_auth=False, 四元组单次有效)
+    from .gt4_helper import GT4TupleListener, build_ha_views
+
+    listener = GT4TupleListener()  # 无回调: config_flow 在用时注入
+    for view in build_ha_views(listener):
+        hass.http.register_view(view)
+    hass.data[DOMAIN]["gt4_listener"] = listener
+    _LOGGER.info("LeChange GT4 slider view registered on HA http port")
     return True
 
 
@@ -53,7 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # 立即拉取一次型号/固件信息
     await coordinator.async_update_device_info()
 
-    # MQTT 实时通道(WI-003): 后台连接, 断线自动重试; 失败不影响轮询
+    # MQTT 实时通道: 后台连接, 断线自动重试; 失败不影响轮询
     await coordinator.async_start_mqtt()
 
     hass.data[DOMAIN][entry.entry_id] = coordinator

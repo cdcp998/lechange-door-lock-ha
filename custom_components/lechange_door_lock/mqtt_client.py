@@ -1,6 +1,6 @@
 """LeChange (Imou) IoT MQTT channel — asyncio client with cloud-API fallback.
 
-WI-003 落地: 基于 API/scripts/mqtt_channel.py 实测全通的协议(2026-09-03):
+协议要点(实测全通):
   ① 凭据: POST /pcs/v1/client_v2/auth/get (apiver 6550, identifier="lcbaseapp"+android_id)
      → {clientId, mqttServer{sslAddr:8883}, username:"Authorization: x-pcs-signature"}
   ② CONNECT(3.1.1): clientId=响应.clientId; username=常量; password=头部 JSON
@@ -116,7 +116,7 @@ async def _read_packet(reader: asyncio.StreamReader) -> tuple[int, bytes]:
 
 
 def _build_ua(user_id: str, terminal_id: str) -> str:
-    """真机 UA(与 imou_client 池对齐; 固定 terminal_id 保证稳定)."""
+    """客户端 UA(与 imou_client 池对齐; 固定 terminal_id 保证稳定)."""
     data = {
         "clientType": "android", "clientVersion": "10.2.2.0831", "clientOV": "15",
         "clientOS": "android", "terminalModel": "HA-Integration-Box",
@@ -148,7 +148,7 @@ def _tls_context(certs_dir: str = "") -> ssl.SSLContext:
     """TLS context: 加载插件内置 CA(dh_sub_ca/ims_root_ca/dahua-root, DER→PEM).
 
     MQTT 服务器(iotmqtt-app-hz.imou.com:8883)使用自签证书链,
-    必须加载逆向 APK 提取的内置 CA 才能验证(系统信任库不含)。
+    必须加载乐橙客户端分发的内置 CA 才能验证(系统信任库不含)。
     """
     import os
 

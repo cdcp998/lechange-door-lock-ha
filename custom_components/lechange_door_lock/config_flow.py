@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -54,7 +55,9 @@ from .const import (
     DEFAULT_SNAPSHOT_CHANNELS,
     DEFAULT_STREAM_PREVIEW_OSD,
     DEFAULT_STREAM_PREVIEW_SECONDS,
+    GT4_LISTEN_PORT,
 )
+from .gt4_helper import GT4TupleListener, parse_12114, parse_verify_token
 from .imou_client import ImouAPIError, ImouClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -70,40 +73,44 @@ PASSWORD_SCHEMA = vol.Schema({vol.Required(CONF_PASSWORD): cv.string})
 SMS_CODE_SCHEMA = vol.Schema({vol.Required("valid_code"): cv.string})
 
 
-async def http_login(username: str, password: str) -> dict:
-    """Password login via the client-side API; returns session dict."""
+async def http_login(username: str, password: str, session_id: str = "") -> dict:
+    """Password login via the client-side API; returns session dict.
+
+    传自有持久 sid(有登录史 → GetToken 直通); 首次为空。
+    """
     async with aiohttp.ClientSession() as session:
-        client = ImouClient(session)
+        client = ImouClient(session, session_id=session_id)
         data = await client.async_login(username, password)
         data["username_input"] = username
         data["password_input"] = password
+        data["sid_used"] = client.session_id
         return data
 
 
-async def http_login_sms(username: str, valid_code: str) -> dict:
-    """SMS verification-code login via GetTokenBySMS."""
+async def http_login_sms(username: str, valid_code: str, session_id: str = "") -> dict:
+    """SMS verification-code login via GetTokenBySMS (default 前缀 AK 身份)."""
     async with aiohttp.ClientSession() as session:
-        client = ImouClient(session)
-        data = await client.async_login_sms(username, valid_code)
+        client = ImouClient(session, session_id=session_id)
+        data = await client.async_get_token_by_sms_ak(valid_code)
         data["username_input"] = username
         data["password_input"] = ""
+        data["sid_used"] = client.session_id
         return data
 
 
-async def http_send_code(username: str) -> bool:
-    """Best-effort SMS code send (GetValidCode, usage=SMSLogin).
+async def http_send_code(username: str, session_id: str = "", usage: str = "SMSLogin") -> bool:
+    """Send SMS code (default 前缀 AK 身份; GT4 通过后调用).
 
-    实测(2026-09-03):登录类 usage 发送被风控拦截(12114 need geetest4 captcha
-    verify,服务端下发 verifyToken);GenerateSnapkey 类可直发(10000)。
-    失败非致命:引导用户从乐橙 App 获取验证码。
+    账号风险态下 usage=Login 的短信被服务端静默丢弃(响应 10000 但不发);
+    SMSLogin 通路必须先过 GT4(CheckGeeTest4)。
     """
     async with aiohttp.ClientSession() as session:
-        client = ImouClient(session)
+        client = ImouClient(session, username=username, session_id=session_id)
         try:
-            await client.async_send_sms_code(username)
+            await client.async_send_sms_code_gt4(usage=usage)
             return True
         except (ImouAPIError, aiohttp.ClientError, TimeoutError) as err:
-            _LOGGER.debug("GetValidCode failed (user may obtain code in app): %s", err)
+            _LOGGER.debug("GetValidCode failed: %s", err)
             return False
 
 
@@ -123,22 +130,29 @@ async def http_list_devices(username: str, password: str, session_data: dict) ->
 
 
 def _login_error(err: ImouAPIError) -> str:
-    """Map login error codes to a config-flow error key (人机验证指南 §2/§4)."""
+    """Map login error codes to a config-flow error key."""
     if err.code == -4:
         return "no_devices"
     if err.code in (-2, -3):
         return "network"
+    if err.code == 12114:
+        return "gt4_required"        # 走本地 GT4 滑块流程(不再指向 App)
     if err.code in (11006, 11007, 11012, 12000, 2033, 2036):
-        return "captcha_needed"      # 风控/极验 GT4(需在乐橙 App 完成滑块)
+        return "captcha_needed"
     if err.code in (2026, 2032, 2016):
-        return "sms_needed"          # 需要短信验证码/两步验证
+        return "sms_needed"
     if err.code in (2011, 2015, 3036):
         return "invalid_auth"
     return "invalid_auth"
 
 
 class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Account + password -> device selection."""
+    """Account + password -> device selection.
+
+    GT4 本地验证: 密码/短信登录遇 12114(风险态 GT4)时, 流程自动进入
+    async_step_gt4 —— 本地起监听器 + 生成滑块页(用户浏览器打开, 手动滑块),
+    四元组回传 → CheckGeeTest4(default 前缀 AK 身份) → 自动重发短信/重试登录 → 继续。
+    """
 
     VERSION = 2
 
@@ -146,6 +160,12 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._login_data: dict = {}
         self._devices: list[dict] = []
         self._username: str = ""
+        self._password: str = ""
+        self._session_id: str = ""          # 自有持久 sid(有登录史即直通)
+        self._gt4_listener: Optional[GT4TupleListener] = None
+        self._gt4_usage: str = "SMSLogin"
+        self._gt4_done: asyncio.Event | None = None
+        self._gt4_error: str = ""
 
     async def async_step_user(self, user_input: Optional[dict] = None) -> FlowResult:
         """选择登录方式:密码或短信验证码."""
@@ -158,14 +178,20 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="user", data_schema=LOGIN_METHOD_SCHEMA, errors=errors)
 
     async def async_step_password(self, user_input: Optional[dict] = None) -> FlowResult:
-        """账号密码登录(风控时引导到乐橙 App 完成人机验证后重试)."""
+        """账号密码登录(12114 时自动进入本地 GT4 滑块流程)."""
         errors = {}
         if user_input is not None:
+            self._password = user_input[CONF_PASSWORD]
             try:
-                login_data = await http_login(self._username, user_input[CONF_PASSWORD])
+                login_data = await http_login(
+                    self._username, self._password, session_id=self._session_id
+                )
                 return await self._after_login(login_data)
             except ImouAPIError as err:
                 _LOGGER.error("Login failed: %s", err)
+                if err.code == 12114:
+                    # 本地 GT4 滑块流程接管
+                    return await self.async_step_gt4()
                 errors["base"] = _login_error(err)
             except (aiohttp.ClientError, TimeoutError) as err:
                 _LOGGER.error("Login network error: %s", err)
@@ -179,19 +205,26 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_sms(self, user_input: Optional[dict] = None) -> FlowResult:
-        """短信验证码登录:验证码从乐橙 App 获取(自动发送 best-effort,受风控限制)."""
+        """短信验证码登录:验证码从本地 GT4 滑块流程获取(风险态自动走 GT4)."""
         errors = {}
         if user_input is None:
-            await http_send_code(self._username)  # best-effort,失败仅提示
+            sent = await http_send_code(self._username, session_id=self._session_id)
+            if not sent:
+                # 风险态: 需要 GT4 → 引导滑块后自动重发
+                return await self.async_step_gt4()
             return self.async_show_form(
                 step_id="sms", data_schema=SMS_CODE_SCHEMA,
                 description_placeholders={"username": self._username},
             )
         try:
-            login_data = await http_login_sms(self._username, user_input["valid_code"])
+            login_data = await http_login_sms(
+                self._username, user_input["valid_code"], session_id=self._session_id
+            )
             return await self._after_login(login_data)
         except ImouAPIError as err:
             _LOGGER.error("SMS login failed: %s", err)
+            if err.code == 12114:
+                return await self.async_step_gt4()
             errors["base"] = _login_error(err)
         except (aiohttp.ClientError, TimeoutError) as err:
             _LOGGER.error("SMS login network error: %s", err)
@@ -201,8 +234,83 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"username": self._username},
         )
 
+    # ------------------------------------------------------------- GT4
+    async def async_step_gt4(self, user_input: Optional[dict] = None) -> FlowResult:
+        """本地 GT4 滑块流程: HA view 渲染滑块页(8123端口, 容器零配置), 用户滑块后自动接力.
+
+        自动接力链(全部无需用户离开 HA):
+          CheckGeeTest4(default 前缀 AK 身份) → GetValidCode(SMSLogin) → 短信到手机
+          → 用户输码(async_step_sms) → GetTokenBySMS → Login → 设备选择
+
+        部署: view 已在 async_setup 注册到 HA 自身端口(8123), 浏览器访问
+              http://<ha-host>:8123/api/lechange/gt4/slides
+        (不再使用独立 8765 监听器 — 容器部署免端口映射)
+        """
+        # 全局 listener(async_setup 已注册 view 到 HA 8123)
+        listener = self.hass.data[DOMAIN].get("gt4_listener")
+        if listener is None:
+            return self.async_abort(reason="gt4_unavailable")
+        # 绑定本次 flow 的回调(四元组 → CheckGeeTest4 → 重发短信)
+        listener._on_tuple = self._on_gt4_tuple
+        # 生成滑块页(相对路径回传 — 反代/HTTPS 自动跟随)
+        listener.html_for(
+            account_label=self._username,
+            verify_token="",            # 空串: CheckGeeTest4 接受空串
+            usage=self._gt4_usage,
+            endpoint="/api/lechange/gt4/tuple",
+        )
+        return self.async_show_form(
+            step_id="gt4",
+            description_placeholders={
+                "url": "/api/lechange/gt4/slides",
+            },
+        )
+
+    async def _on_gt4_tuple(self, t: dict) -> None:
+        """四元组回传 → CheckGeeTest4 → 重发短信 → 唤醒流程等待."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                client = ImouClient(
+                    session, username=self._username,
+                    session_id=self._session_id or None,
+                )
+                # CheckGeeTest4(default 前缀 AK 身份 + SK 单哈希)
+                await client.async_check_geetest4(
+                    lot_number=t["lot_number"],
+                    captcha_output=t["captcha_output"],
+                    pass_token=t["pass_token"],
+                    gen_time=t["gen_time"],
+                    usage=self._gt4_usage,
+                )
+                # 重发短信(同 usage)
+                await client.async_send_sms_code_gt4(usage=self._gt4_usage)
+            self._gt4_error = ""
+        except ImouAPIError as err:
+            _LOGGER.error("GT4 relay failed: %s", err)
+            self._gt4_error = str(err)
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.error("GT4 relay network error: %s", err)
+            self._gt4_error = f"network: {err}"
+        finally:
+            if self._gt4_done is not None:
+                self._gt4_done.set()
+
+    async def async_step_gt4_wait(self, user_input: Optional[dict] = None) -> FlowResult:
+        """等待滑块+短信完成(用户输码后回到 sms 步骤)."""
+        if self._gt4_done is not None:
+            try:
+                await asyncio.wait_for(self._gt4_done.wait(), timeout=180)
+            except asyncio.TimeoutError:
+                return self.async_abort(reason="gt4_timeout")
+        if self._gt4_error:
+            return self.async_abort(reason="gt4_failed")
+        # GT4 通过 + 短信已发 → 回到短信输入步骤
+        return await self.async_step_sms()
+
     async def _after_login(self, login_data: dict) -> FlowResult:
-        """登录成功 → 拉取设备列表 → 设备选择."""
+        """登录成功 → 持久化自有 sid → 拉取设备列表 → 设备选择."""
+        # 记住自有 sid(有登录史 → 后续密码 GetToken 永远直通)
+        self._session_id = login_data.get("session_id") or self._session_id
         devices = await http_list_devices(
             login_data["username_input"], login_data.get("password_input", ""), login_data
         )
@@ -211,6 +319,8 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raise ImouAPIError(-4, "no devices")
         self._login_data = login_data
         self._devices = devices
+        # HA view 形态: view 挂在 HA 8123 上, 不需要 stop(页面仍在但无害)
+        self._gt4_listener = None
         return await self.async_step_device()
 
     async def async_step_device(self, user_input: Optional[dict] = None) -> FlowResult:
@@ -245,7 +355,7 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     CONF_LOCK_STATE: device.get("lockState", ""),
                     CONF_STREAM_ENTRY: device.get("stream_entry", ""),
-                    # 设备密码体系(WI-008 两套密码, 同一 KDF 两个代次):
+                    # 设备密码体系(两套密码, 同一 KDF 两个代次):
                     # 安全码=出厂代(告警图解密); 设备密码=当前代(流帧解密),
                     # 未修改过设备密码时与安全码相同 → 留空回退用安全码。
                     CONF_SECURITY_CODE: security_code,
@@ -288,7 +398,7 @@ class LeChangeOptionsFlowHandler(config_entries.OptionsFlow):
         entry_data = self._entry.data or {}
         schema = vol.Schema(
             {
-                # --- 设备密码体系(两套密码 WI-008) ---
+                # --- 设备密码体系(两套密码) ---
                 vol.Optional(
                     CONF_SECURITY_CODE,
                     description={"suggested_value": entry_data.get(CONF_SECURITY_CODE, "")},

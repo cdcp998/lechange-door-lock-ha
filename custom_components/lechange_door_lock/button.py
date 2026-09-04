@@ -127,7 +127,7 @@ class LeChangeGenerateSnapkeyButton(_BaseLeChangeButton):
 
     async def async_press(self) -> None:
         coordinator = self.coordinator
-        # 抓包/测试报告(R14)验证:客户端生成 tempKey,经消息域 Add 直接登记
+        # 客户端生成 tempKey,经消息域 Add 直接登记(实测)
         result = await coordinator.async_create_snapkey_cloud()
         coordinator.set_snapkey_result(result)
         coordinator.hass.bus.async_fire(

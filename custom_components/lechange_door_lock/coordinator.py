@@ -87,7 +87,7 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         # 云端媒体管理(门外截图节流/缓存 + 告警图解码, 依赖安全码/设备密码)
         self.media = MediaManager(self)
 
-        # MQTT 实时通道(WI-003): 状态推送 + 控制优先 MQTT, 云 API 兜底
+        # MQTT 实时通道: 状态推送 + 控制优先 MQTT, 云 API 兜底
         self.mqtt = MqttManager(
             self.api,
             self.device_id,
@@ -219,7 +219,7 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         else:
             data["channel_names"] = {}
 
-        # ---- 云侧告警(设备休眠也可用,抓包验证) ---------------------------
+        # ---- 云侧告警(设备休眠也可用) ------------------------------------
         try:
             alarm_data = await self.api.async_get_alarm_messages(
                 self.device_id, self.product_id, self.channel_id
@@ -343,7 +343,7 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         )
 
     async def async_create_snapkey_cloud(self, config: Optional[dict] = None) -> dict:
-        """按抓包/测试报告(R14)方案生成临时密码:客户端自产 keyId/tempKey,
+        """生成临时密码:客户端自产 keyId/tempKey,
         经消息域 `iot.message.SmartLockSecretAdd` 直接登记(不加 SetService,
         不触发身份验证码;设备休眠也可用,实测 10000)。
 

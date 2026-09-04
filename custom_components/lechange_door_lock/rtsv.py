@@ -1,6 +1,6 @@
 """RTSV1 云端实时流(异步): 取流 → TLS PLAY(WSSE) → RTP/DHAV 解帧 → 解密 → H.264。
 
-移植自 API/scripts/preview_live.py(WI-007 实测打通, 快照 480×640):
+协议要点(实测打通, 快照 480×640):
   1. things.media.GetRealTransferStreamUrl → resource(TCP:11004) / tls_resource(+500)
      ★ 该请求兼具唤醒语义(休眠设备 ~5s 上线); 仅主码流 streamId='1' 中继有数据
   2. TLS PLAY (WSSE UsernameToken) → 200 OK + SDP(H264 PT96)
@@ -9,7 +9,7 @@
      enc 段(SPS+PPS+IDR 片头) AES-256-OFB(key=KDF(设备密码)) 解密
   5. 输出裸 H.264 Annex-B, ffmpeg 可直接转码/抽帧
 
-密码语义(WI-008 两套体系): 帧解密用「当前设备密码」;
+密码语义(两套体系): 帧解密用「当前设备密码」;
 WSSE 认证实测用安全码/设备密码均可(200 OK)。
 """
 

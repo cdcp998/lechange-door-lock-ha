@@ -1,4 +1,4 @@
-"""MQTT realtime channel facade for the LeChange integration (WI-003).
+"""MQTT realtime channel facade for the LeChange integration.
 
 - 连接管理: 后台任务持有 MqttClient, 断线自动重连(指数退避)
 - 事件处理: iot_response/iot_request/android_iot_property 推送 → coordinator 回调
