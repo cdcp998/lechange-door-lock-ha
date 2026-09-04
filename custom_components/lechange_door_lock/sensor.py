@@ -2,29 +2,30 @@
 
 from __future__ import annotations
 
-import logging
-
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
 )
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, PROP_LOCK_STATE
+from .const import CONF_DEVICE_ID, DOMAIN, PROP_LOCK_STATE
+from .entity import LeChangeEntity
 from .state_utils import derive_door_state, format_open_door_time, open_method_label
-
-_LOGGER = logging.getLogger(__name__)
 
 DOOR_STATE_OPTIONS = ["closed", "open", "unknown"]
 POWER_MODE_OPTIONS = ["0", "1", "2", "unknown"]
 WIFI_SIGNAL_OPTIONS = ["0", "1", "2", "3", "4"]
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+):
     """Set up sensor entities."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    device_id = entry.data["device_id"]
+    device_id = entry.data[CONF_DEVICE_ID]
     entities = [
         LeChangeBatterySensor(coordinator, device_id, "battery_lock"),
         LeChangeBatterySensor(coordinator, device_id, "battery_camera"),
@@ -37,18 +38,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
         LeChangeSnapkeyCountSensor(coordinator, device_id),
         LeChangeLatestAlarmSensor(coordinator, device_id),
     ]
-    async_add_entities(entities, True)
+    async_add_entities(entities)
 
 
-class _BaseLeChangeSensor(CoordinatorEntity, SensorEntity):
-    _attr_has_entity_name = True
-
+class _BaseLeChangeSensor(LeChangeEntity, SensorEntity):
     def __init__(self, coordinator, device_id: str, translation_key: str) -> None:
-        super().__init__(coordinator)
-        self._device_id = device_id
-        self._attr_translation_key = translation_key
-        self._attr_unique_id = f"{device_id}_{translation_key}"
-        self._attr_device_info = {"identifiers": {(DOMAIN, device_id)}}
+        super().__init__(coordinator, device_id, translation_key)
 
 
 class LeChangeBatterySensor(_BaseLeChangeSensor):
@@ -65,7 +60,9 @@ class LeChangeBatterySensor(_BaseLeChangeSensor):
         data = self.coordinator.data
         if not data:
             return None
-        return data.get("battery_lock") if self._kind == "battery_lock" else data.get("battery_camera")
+        if self._kind == "battery_lock":
+            return data.get("battery_lock")
+        return data.get("battery_camera")
 
     @property
     def available(self) -> bool:

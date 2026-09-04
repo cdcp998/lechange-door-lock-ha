@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-import logging
-
 from homeassistant.components.number import NumberEntity
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_DEVICE_ID, DOMAIN
 from .entity import LeChangeEntity
 
-_LOGGER = logging.getLogger(__name__)
 
-
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+):
     """Set up temporary-password number entities."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     device_id = entry.data[CONF_DEVICE_ID]
@@ -22,7 +23,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
             LeChangeSnapkeyEffectiveNum(coordinator, device_id),
             LeChangeSnapkeyEffectiveDay(coordinator, device_id),
         ],
-        True,
     )
 
 

@@ -5,31 +5,34 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.lock import LockEntity, LockEntityFeature
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, EVENT_PREFIX, KEY_TYPE_NAMES, PROP_LOCK_STATE
+from .const import CONF_DEVICE_ID, DOMAIN, EVENT_PREFIX, KEY_TYPE_NAMES, PROP_LOCK_STATE
+from .entity import LeChangeEntity
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+):
     """Set up the lock entity."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([LeChangeDoorLock(coordinator, entry.data["device_id"])], True)
+    async_add_entities([LeChangeDoorLock(coordinator, entry.data[CONF_DEVICE_ID])])
 
 
-class LeChangeDoorLock(CoordinatorEntity, LockEntity):
+class LeChangeDoorLock(LeChangeEntity, LockEntity):
     """Representation of the smart door lock."""
 
-    _attr_has_entity_name = True
     _attr_translation_key = "door_lock"
     _attr_supported_features = LockEntityFeature.OPEN
 
     def __init__(self, coordinator, device_id: str) -> None:
-        super().__init__(coordinator)
-        self._device_id = device_id
-        self._attr_unique_id = f"{device_id}_lock"
-        self._attr_device_info = {"identifiers": {(DOMAIN, device_id)}}
+        super().__init__(coordinator, device_id, "lock")  # unique_id 后缀保持 _lock
+        self._attr_translation_key = "door_lock"
 
     @property
     def is_locked(self) -> bool | None:
@@ -67,12 +70,16 @@ class LeChangeDoorLock(CoordinatorEntity, LockEntity):
     async def async_unlock(self) -> None:
         """Unlock the door remotely (iot.control.SetService remoteOpenDoor)."""
         coordinator = self.coordinator
-        result = await coordinator.api.async_set_service(
-            coordinator.device_id,
-            coordinator.product_id,
-            "remoteOpenDoor",
-            {},
-        )
+        try:
+            result = await coordinator.api.async_set_service(
+                coordinator.device_id,
+                coordinator.product_id,
+                "remoteOpenDoor",
+                {},
+            )
+        except Exception as err:
+            _LOGGER.warning("远程开门失败: %s", err)
+            raise HomeAssistantError(f"远程开门失败: {err}") from err
         _LOGGER.debug("remoteOpenDoor result: %s", result)
         coordinator.hass.bus.async_fire(
             EVENT_PREFIX, {"type": "open_door", "device_id": self._device_id, "result": result}

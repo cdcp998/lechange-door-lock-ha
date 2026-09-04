@@ -22,16 +22,14 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import random
 import socket
 import ssl
 import string
 import struct
-import time
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Optional
-
-from .const import API_ENTRY_HOST, CA_FILE
+from typing import Awaitable, Callable, Optional
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -150,8 +148,6 @@ def _tls_context(certs_dir: str = "") -> ssl.SSLContext:
     MQTT 服务器(iotmqtt-app-hz.imou.com:8883)使用自签证书链,
     必须加载乐橙客户端分发的内置 CA 才能验证(系统信任库不含)。
     """
-    import os
-
     ctx = ssl.create_default_context()
     if certs_dir:
         for fname in ("dh_sub_ca.crt", "ims_root_ca.crt", "dahua-root.pem"):
@@ -159,7 +155,8 @@ def _tls_context(certs_dir: str = "") -> ssl.SSLContext:
             if not os.path.exists(path):
                 continue
             try:
-                raw = open(path, "rb").read()
+                with open(path, "rb") as f:
+                    raw = f.read()
                 if b"-----BEGIN" not in raw:
                     # DER → PEM
                     raw = (b"-----BEGIN CERTIFICATE-----\n"
@@ -279,6 +276,7 @@ class MqttClient:
         self._seq += 1
         seq = self._seq
         fut: asyncio.Future = self._loop.create_future()
+        # 先注册再发布: 防止响应在注册前到达被 _read_loop 丢弃(竞态)
         self._pending[seq] = fut
         req = {"api": api, "params": params, "seq": seq}
         try:

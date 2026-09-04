@@ -94,9 +94,6 @@ create_snapkey:
     number:
       name: 使用次数
       description: 密钥可使用次数(-1 无限 / 1-255)。
-    effect_period:
-      name: 生效时间段
-      description: 时间段列表,元素含 period(0=周日..6=周六)、beginTime、endTime。
 
 get_snapkey_list:
   name: 获取临时密码列表

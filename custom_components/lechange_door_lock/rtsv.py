@@ -18,13 +18,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import logging
+import os
 import secrets
 import ssl
+import subprocess
+import tempfile
 import time
+from datetime import datetime, timedelta
 
 from .const import (
-    MEDIA_APIVER,
     MEDIA_STREAM_PAYLOAD_TYPES,
     STREAM_CONNECT_TIMEOUT,
     STREAM_KEEPALIVE_INTERVAL,
@@ -482,10 +486,6 @@ def _combine_jpegs(frames: list[bytes], layout: str) -> bytes | None:
 
 def _combine_ffmpeg(frames: list[bytes], layout: str) -> bytes | None:
     """ffmpeg 拼接: hstack(等高)/vstack(等宽)。"""
-    import os
-    import subprocess
-    import tempfile
-
     ffmpeg = _find_ffmpeg()
     if not ffmpeg:
         return None
@@ -540,8 +540,6 @@ def _combine_ffmpeg(frames: list[bytes], layout: str) -> bytes | None:
 def _combine_pil(frames: list[bytes], layout: str) -> bytes | None:
     """PIL 拼接回退(hstack 等高 / vstack 等宽)。"""
     try:
-        import io
-
         from PIL import Image
     except ImportError:
         return None
@@ -587,9 +585,6 @@ def overlay_osd_region(jpeg: bytes, text: str, region: tuple[float, float, float
     白色细字(黑 1px 描边)贴合区域右下角, 不喧宾夺主。
     """
     try:
-        import io
-        import os
-
         from PIL import Image, ImageDraw, ImageFont
 
         img = Image.open(io.BytesIO(jpeg)).convert("RGB")
@@ -650,8 +645,6 @@ def overlay_osd(jpeg: bytes, lines: list[str], alpha: int = 160,
     优先 PIL(自动尝试插件内置思源黑体, 与预览同字体); 失败静默返回原图。
     """
     try:
-        import io
-
         from PIL import Image, ImageDraw, ImageFont
 
         img = Image.open(io.BytesIO(jpeg)).convert("RGB")
@@ -771,8 +764,6 @@ def _find_cjk_font() -> str | None:
       fontconfig 缺配置而段错误(实测 rc=3221225477), 因此必须总是返回一个
       存在的绝对路径字体(插件内置优先, 系统字体兜底)。
     """
-    import os
-
     candidates = []
     # 插件内置字体(绝对稳定)
     pkg_dir = os.path.dirname(os.path.abspath(__file__))
@@ -865,9 +856,6 @@ async def async_osd_video(
     seconds: 预估视频时长 → 每 1s 一段 drawtext, 文本=该秒真实时间
              (%Y-%m-%d %H:%M:%S), 播放时逐秒更新(不依赖 localtime 变量)。
     """
-    import subprocess
-    from datetime import datetime, timedelta
-
     ffmpeg = _find_ffmpeg()
     if not ffmpeg:
         _LOGGER.warning("ffmpeg not found; preview OSD unavailable")

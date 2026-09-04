@@ -6,7 +6,9 @@ Dahua/Imou RTSP URI convention:
 
 from __future__ import annotations
 
+import json
 import re
+import urllib.parse
 
 _IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
@@ -65,8 +67,6 @@ def build_rtsp_url(
     if username:
         user = username.strip()
         pw = str(password or "").strip()
-        import urllib.parse
-
         cred = f"{urllib.parse.quote(user)}:{urllib.parse.quote(pw)}@"
     ch = int(channel_id) + 1
     return (
@@ -82,8 +82,6 @@ def parse_channel_hosts(raw: str | dict) -> dict[str, str]:
       - JSON: '{"0": "192.168.1.10", "1": "192.168.1.11:554"}'
       - 多行: '0=192.168.1.10\n1=192.168.1.11:554'
     """
-    import json
-
     out: dict[str, str] = {}
     if isinstance(raw, dict):
         for k, v in raw.items():

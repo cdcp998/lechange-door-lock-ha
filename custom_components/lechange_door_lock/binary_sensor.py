@@ -2,23 +2,24 @@
 
 from __future__ import annotations
 
-import logging
-
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
+from .const import CONF_DEVICE_ID, DOMAIN
+from .entity import LeChangeEntity
 
-_LOGGER = logging.getLogger(__name__)
 
-
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+):
     """Set up binary sensors."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    device_id = entry.data["device_id"]
+    device_id = entry.data[CONF_DEVICE_ID]
     entities = [
         LeChangeOnlineSensor(coordinator, device_id),
         LeChangeSleepingSensor(coordinator, device_id),
@@ -30,18 +31,12 @@ async def async_setup_entry(hass, entry, async_add_entities):
         entities.append(
             LeChangeChannelOnlineSensor(coordinator, device_id, str(ch.get("channelId", "0")))
         )
-    async_add_entities(entities, True)
+    async_add_entities(entities)
 
 
-class _BaseLeChangeBinarySensor(CoordinatorEntity, BinarySensorEntity):
-    _attr_has_entity_name = True
-
+class _BaseLeChangeBinarySensor(LeChangeEntity, BinarySensorEntity):
     def __init__(self, coordinator, device_id: str, translation_key: str) -> None:
-        super().__init__(coordinator)
-        self._device_id = device_id
-        self._attr_translation_key = translation_key
-        self._attr_unique_id = f"{device_id}_{translation_key}"
-        self._attr_device_info = {"identifiers": {(DOMAIN, device_id)}}
+        super().__init__(coordinator, device_id, translation_key)
 
 
 class LeChangeOnlineSensor(_BaseLeChangeBinarySensor):

@@ -211,13 +211,6 @@ create_snapkey:
           min: -1
           max: 255
           step: 1
-    effect_period:
-      name: Effect period
-      description: List of periods with day (0=Sunday..6=Saturday), beginTime, endTime.
-      required: false
-      default: []
-      selector:
-        object:
 
 get_snapkey_list:
   name: Get temporary password list

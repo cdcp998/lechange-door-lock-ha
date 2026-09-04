@@ -79,6 +79,7 @@ Object.defineProperty(navigator, 'userAgent', {
   var VERIFY_TOKEN = "__VERIFY_TOKEN__";
   var USAGE = "__USAGE__";
   var ACCOUNT_ENC = "__ACCOUNT_ENC__";
+  var TOKEN = "__TOKEN__";
   var statusEl = document.getElementById("status");
   var resultEl = document.getElementById("result");
 
@@ -105,7 +106,8 @@ Object.defineProperty(navigator, 'userAgent', {
           captcha_id: res.captcha_id || CAPTCHA_ID,
           verify_token: VERIFY_TOKEN,
           usage: USAGE,
-          account_enc: ACCOUNT_ENC
+          account_enc: ACCOUNT_ENC,
+          token: TOKEN
         })
       }).then(function (r) { return r.json(); }).then(function (j) {
         resultEl.style.display = "block";
@@ -132,6 +134,7 @@ def build_gt4_html(
     endpoint: str,
     usage: str = "SMSLogin",
     account_enc: str = "",
+    token: str = "",
 ) -> str:
     """Render gt4.html with the current challenge parameters injected."""
     html = _GT4_HTML_TEMPLATE
@@ -141,6 +144,7 @@ def build_gt4_html(
     html = html.replace("__VERIFY_TOKEN__", verify_token or "")
     html = html.replace("__USAGE__", usage)
     html = html.replace("__ACCOUNT_ENC__", account_enc or "")
+    html = html.replace("__TOKEN__", token or "")
     return html
 
 
@@ -166,28 +170,60 @@ class GT4TupleListener:
     ):
         self.port = port
         self._on_tuple = on_tuple
-        self._html_cache: Optional[str] = None
+        self._callbacks: dict[str, Callable[[dict], Any]] = {}  # token → 回调(多 flow)
+        self._html_cache: Optional[str] = None          # 最后生成的一页(无 token 调试/兼容)
+        self._html_by_token: dict[str, str] = {}        # 多挑战路由: token → 页面
+        self._dispatched: set[str] = set()              # 已派发(单次消费)
         self._server: Optional[asyncio.AbstractServer] = None
         self._task: Optional[asyncio.Task] = None
         self.last_tuple: Optional[dict] = None
+        self._token: str = ""            # 最近一次挑战令牌(无 token 兼容)
+        self._last_dispatch: float = 0.0  # 无 token 路径的幂等/限速
 
     # ------------------------------------------------------------- html
     def html_for(
         self, account_label: str, verify_token: str,
         usage: str = "SMSLogin", account_enc: str = "",
         endpoint: Optional[str] = None,
+        token: str = "",
     ) -> str:
         """Generate + cache the slider page for the current challenge.
 
         endpoint 默认回传到独立端口; HA 形态A 时由调用方传
         '/api/lechange/gt4/tuple'(相对路径, 浏览器自动带 HA host:port)。
+        token: 一次性挑战令牌(页面注入, 回传校验; 空=不校验, 兼容旧用法)。
+        并发多流程: 每次 html_for 带唯一 token, 页面按 token 分页缓存,
+        回传时按 token 路由到对应挑战(单次消费)。
         """
-        self._html_cache = build_gt4_html(
+        html = build_gt4_html(
             account_label, verify_token,
             endpoint or f"http://<ha-host>:{self.port}{GT4_LISTEN_PATH}",
-            usage, account_enc,
+            usage, account_enc, token,
         )
-        return self._html_cache
+        self._html_cache = html
+        if token:
+            self._html_by_token[token] = html
+            self._dispatched.discard(token)  # 重新武装(新挑战)
+            self._token = token
+            self._last_dispatch = 0.0
+        return html
+
+    def set_callback(self, token: str, cb: Callable[[dict], Any]) -> None:
+        """绑定一个挑战(按 token)的回调; 空 token 走全局 _on_tuple。"""
+        if token:
+            self._callbacks[token] = cb
+        else:
+            self._on_tuple = cb
+
+    def clear_callback(self, token: str = "") -> None:
+        """清除挑战回调(流程结束/abort 时调用, 防泄漏)。"""
+        if token:
+            self._callbacks.pop(token, None)
+            self._html_by_token.pop(token, None)
+            self._dispatched.discard(token)
+        else:
+            self._on_tuple = None
+            self._html_cache = None
 
     # ------------------------------------------------------------- server(形态B)
     async def start(self) -> None:
@@ -214,16 +250,27 @@ class GT4TupleListener:
 
     # ------------------------------------------------------------- handlers(共用)
     async def handle_html_request(self, request) -> "web.Response":
-        """HTML handler — HA view 与独立监听共用."""
-        if not self._html_cache:
+        """HTML handler — HA view 与独立监听共用.
+
+        支持 ?token=xxx 按挑战取页(多 flow 并发); 无 token 回退最近一页。
+        """
+        token = (request.query.get("token") or "") if hasattr(request, "query") else ""
+        html = self._html_by_token.get(token) if token else None
+        if html is None:
+            html = self._html_cache
+        if not html:
             return web.Response(
                 text="slider page not prepared yet (call html_for first)",
                 status=503, content_type="text/plain",
             )
-        return web.Response(text=self._html_cache, content_type="text/html")
+        return web.Response(text=html, content_type="text/html")
 
     async def handle_tuple_request(self, request) -> "web.Response":
-        """Tuple handler — HA view 与独立监听共用."""
+        """Tuple handler — HA view 与独立监听共用.
+
+        带 token 的回传按 token 路由到对应挑战的回调(单次消费);
+        无 token 走全局 _on_tuple(独立监听/调试兼容)。
+        """
         try:
             body = await request.text()
             t = json.loads(body)
@@ -231,25 +278,41 @@ class GT4TupleListener:
             t = {}
         need = ("lot_number", "captcha_output", "pass_token", "gen_time")
         ok = all(t.get(k) for k in need)
+        token = str(t.get("token") or "").strip()
+        if ok and token:
+            if token not in self._html_by_token:
+                _LOGGER.warning("GT4 tuple token not found (stale/unknown challenge)")
+                ok = False
+            elif token in self._dispatched:
+                _LOGGER.warning("GT4 tuple already dispatched; ignoring replay")
+                ok = False
         resp = web.Response(
             text='{"ok": ' + ("true" if ok else "false") + "}",
             content_type="application/json",
             headers={"Access-Control-Allow-Origin": "*"},
         )
         if not ok:
-            _LOGGER.warning("GT4 tuple incomplete: %s", body[:120])
+            _LOGGER.warning("GT4 tuple rejected: %s", body[:120])
             return resp
         t.setdefault("captcha_id", GT4_CAPTCHA_ID)
         t["age_min"] = round((time.time() - int(t["gen_time"])) / 60, 2) if str(t.get("gen_time", "")).isdigit() else None
         self.last_tuple = t
+        if token:
+            self._dispatched.add(token)   # 单次消费(重放拒绝)
+        else:
+            self._last_dispatch = time.monotonic()
         _LOGGER.info("GT4 tuple received (age=%s min), dispatching callback", t.get("age_min"))
-        if self._on_tuple is not None:
-            asyncio.get_running_loop().create_task(self._dispatch(t))
+        asyncio.get_running_loop().create_task(self._dispatch(t, token))
         return resp
 
-    async def _dispatch(self, t: dict) -> None:
+    async def _dispatch(self, t: dict, token: str = "") -> None:
+        """按 token 路由回调; 无 token 走全局 _on_tuple(调试/兼容)."""
+        cb = self._callbacks.get(token) if token else self._on_tuple
+        if cb is None:
+            _LOGGER.debug("GT4 tuple has no callback (token=%s)", token or "-")
+            return
         try:
-            result = self._on_tuple(t)
+            result = cb(t)
             if asyncio.iscoroutine(result):
                 await result
         except Exception as err:  # noqa: BLE001 - 回调异常不拖垮监听
@@ -288,7 +351,8 @@ def build_ha_views(listener: "GT4TupleListener", html_route: str = "/api/lechang
 
     说明:
       - requires_auth=False: 滑块页需在手机/任意浏览器匿名打开(短信场景);
-        四元组本身不构成安全凭证(单次有效+10min过期), 风险可控。
+        回传携带一次性挑战 token(页面注入, 后端单次消费 + 按 token 路由),
+        非持有 token 的回传被拒绝。
       - CORS: 同源(页面与回传同在 8123)无需 CORS 头, 但页面以相对路径 fetch
         更稳(反向代理/HTTPS 场景自动跟随)。
     """

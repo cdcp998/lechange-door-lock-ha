@@ -19,8 +19,6 @@ CONF_SESSION_ID = "session_id"        # GetToken 返回的 sessionId
 CONF_TOKEN = "token"                  # GetToken 返回的 token(派生签名密钥)
 CONF_INTERNAL_USERNAME = "internal_username"  # 云端内部账号名 (lc1n...)
 CONF_USER_ID = "user_id"
-CONF_KEY1 = "key1"                    # 登录后: md5(token) 小写
-CONF_KEY2 = "key2"                    # 登录后: sha256(token) 小写
 CONF_API_HOST = "api_host"            # 区域网关 (entryUrlV2)
 CONF_DEVICE_ID = "device_id"
 CONF_DEVICE_NAME = "device_name"
@@ -155,12 +153,10 @@ NEED_GT4_CODES = {12114}
 NEED_CREDIT_CODES = {12112}
 
 # --- model property identifiers ---------------------------------------------
-PROP_LOCK_STATUS = "doorLockStatus"      # 0 门已锁 / 1 门未锁 / 2 未知
 PROP_LOCK_STATE = "doorLockState"        # 0 关 / 1 开 (门物理状态)
 PROP_POWER_STATE = "powerState"          # 0 正常 / 1 省电 / 2 超级省电
 PROP_TAMPER = "tamper"
 PROP_CHILD_LOCK = "child_lock"
-PROP_OPEN_DOOR_MSG = "openDoorMsg"
 PROP_WIFI_DOOR_LOCK = "wifiDoorLock"     # struct {SSID, status, intensity...}
 PROP_SLEEP_STATUS = "sleepStatus"
 PROP_WAKEUP_STATUS = "wakeupStatus"
@@ -169,7 +165,6 @@ PROP_DEVICE_POWER_LOCK = "devicePowerLock"  # array: 电池列表
 PROP_LOCK_NOTE_REPORT = "lockNoteReport"    # array: 开门记录
 PROP_CHANNEL_NAMES = "ipc_devChnName"       # array: 摄像头通道名
 PROP_CALL_TRANSFER = "sdl_callTransferSwitch"  # 0 关 / 1 开
-PROP_NIGHT_MODE = "NightMode"
 
 # --- device list status ----------------------------------------------------
 STATUS_ONLINE = "online"

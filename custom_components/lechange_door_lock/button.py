@@ -7,37 +7,36 @@ from datetime import datetime
 from pathlib import Path
 
 from homeassistant.components.button import ButtonEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .camera import LeChangeCameraEntity
-from .const import DOMAIN, EVENT_PREFIX
+from .const import CONF_DEVICE_ID, DOMAIN, EVENT_PREFIX
+from .entity import LeChangeEntity
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+):
     """Set up button entities."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    device_id = entry.data["device_id"]
+    device_id = entry.data[CONF_DEVICE_ID]
     entities = [
         LeChangeOpenDoorButton(coordinator, device_id),
         LeChangeSnapshotDoorButton(coordinator, device_id),
         LeChangeGenerateSnapkeyButton(coordinator, device_id),
         LeChangeRefreshSnapkeyListButton(coordinator, device_id),
     ]
-    async_add_entities(entities, True)
+    async_add_entities(entities)
 
 
-class _BaseLeChangeButton(CoordinatorEntity, ButtonEntity):
-    _attr_has_entity_name = True
-
+class _BaseLeChangeButton(LeChangeEntity, ButtonEntity):
     def __init__(self, coordinator, device_id: str, translation_key: str) -> None:
-        super().__init__(coordinator)
-        self._device_id = device_id
-        self._attr_translation_key = translation_key
-        self._attr_unique_id = f"{device_id}_{translation_key}"
-        self._attr_device_info = {"identifiers": {(DOMAIN, device_id)}}
+        super().__init__(coordinator, device_id, translation_key)
 
 
 class LeChangeOpenDoorButton(_BaseLeChangeButton):
@@ -86,11 +85,15 @@ class LeChangeSnapshotDoorButton(_BaseLeChangeButton):
             raise HomeAssistantError(
                 "获取门外截图失败:请确认集成选项已配置局域网 rtsp_host(及 RTSP 凭据)且设备在线"
             )
-        www = Path(coordinator.hass.config.path("www"))
-        (www / "lechange").mkdir(parents=True, exist_ok=True)
-        filename = f"lechange_{self._device_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-        (www / "lechange" / filename).write_bytes(image)
-        url = f"/local/lechange/{filename}"
+
+        def _write() -> str:
+            www = Path(coordinator.hass.config.path("www"))
+            (www / "lechange_door_lock").mkdir(parents=True, exist_ok=True)
+            filename = f"lechange_{self._device_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            (www / "lechange_door_lock" / filename).write_bytes(image)
+            return f"/local/lechange_door_lock/{filename}"
+
+        url = await coordinator.hass.async_add_executor_job(_write)
         # 记录最近一次快照地址
         if isinstance(coordinator.entry.options, dict):
             coordinator.hass.config_entries.async_update_entry(

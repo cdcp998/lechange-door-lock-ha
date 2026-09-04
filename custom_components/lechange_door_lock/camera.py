@@ -17,7 +17,9 @@ import logging
 import aiohttp
 
 from homeassistant.components.camera import Camera, CameraEntityFeature
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     CONF_CHANNEL_JSON,
@@ -31,12 +33,15 @@ from .const import (
     CONF_STREAM_ENTRY,
     DOMAIN,
 )
+from .entity import LeChangeEntity
 from .streams import build_rtsp_url, is_lan_host, split_host_port
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+):
     """Set up one camera entity per camera channel."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     device_id = entry.data[CONF_DEVICE_ID]
@@ -56,23 +61,20 @@ async def async_setup_entry(hass, entry, async_add_entities):
         LeChangeCameraEntity(coordinator, device_id, str(ch.get("channelId", "0")))
         for ch in channels
     ]
-    async_add_entities(entities, True)
+    async_add_entities(entities)
 
 
-class LeChangeCameraEntity(CoordinatorEntity, Camera):
+class LeChangeCameraEntity(LeChangeEntity, Camera):
     """Camera entity for one doorbell channel of the lock."""
 
-    _attr_has_entity_name = True
     _attr_translation_key = "camera"
     _attr_supported_features = CameraEntityFeature(0)
 
     def __init__(self, coordinator, device_id: str, channel_id: str) -> None:
-        super().__init__(coordinator)
-        Camera.__init__(self)
-        self._device_id = device_id
+        super().__init__(coordinator, device_id, f"camera_{channel_id}")
+        Camera.__init__(self)  # Camera 未走合作式 super 链, 需显式初始化
         self._channel_id = channel_id
-        self._attr_unique_id = f"{device_id}_camera_{channel_id}"
-        self._attr_device_info = {"identifiers": {(DOMAIN, device_id)}}
+        self._attr_translation_key = "camera"  # 恢复带占位符的翻译键
         self._attr_translation_placeholders = {"channel_id": channel_id}
 
     # ---- helpers ----------------------------------------------------------

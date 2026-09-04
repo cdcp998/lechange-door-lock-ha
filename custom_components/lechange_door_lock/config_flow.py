@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from typing import Optional
 
 import aiohttp
 import voluptuous as vol
-from homeassistant import config_entries
-from homeassistant.data_entry_flow import FlowResult
 import homeassistant.helpers.config_validation as cv
+from homeassistant import config_entries
+from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResult
 
 from .const import (
     DOMAIN,
@@ -55,9 +57,7 @@ from .const import (
     DEFAULT_SNAPSHOT_CHANNELS,
     DEFAULT_STREAM_PREVIEW_OSD,
     DEFAULT_STREAM_PREVIEW_SECONDS,
-    GT4_LISTEN_PORT,
 )
-from .gt4_helper import GT4TupleListener, parse_12114, parse_verify_token
 from .imou_client import ImouAPIError, ImouClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -162,10 +162,11 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._username: str = ""
         self._password: str = ""
         self._session_id: str = ""          # 自有持久 sid(有登录史即直通)
-        self._gt4_listener: Optional[GT4TupleListener] = None
         self._gt4_usage: str = "SMSLogin"
         self._gt4_done: asyncio.Event | None = None
+        self._gt4_token: str = ""
         self._gt4_error: str = ""
+        self._sms_already_sent: bool = False
 
     async def async_step_user(self, user_input: Optional[dict] = None) -> FlowResult:
         """选择登录方式:密码或短信验证码."""
@@ -208,10 +209,11 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """短信验证码登录:验证码从本地 GT4 滑块流程获取(风险态自动走 GT4)."""
         errors = {}
         if user_input is None:
-            sent = await http_send_code(self._username, session_id=self._session_id)
-            if not sent:
-                # 风险态: 需要 GT4 → 引导滑块后自动重发
-                return await self.async_step_gt4()
+            if not self._sms_already_sent:
+                sent = await http_send_code(self._username, session_id=self._session_id)
+                if not sent:
+                    # 风险态: 需要 GT4 → 引导滑块后自动重发
+                    return await self.async_step_gt4()
             return self.async_show_form(
                 step_id="sms", data_schema=SMS_CODE_SCHEMA,
                 description_placeholders={"username": self._username},
@@ -242,27 +244,48 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
           CheckGeeTest4(default 前缀 AK 身份) → GetValidCode(SMSLogin) → 短信到手机
           → 用户输码(async_step_sms) → GetTokenBySMS → Login → 设备选择
 
-        部署: view 已在 async_setup 注册到 HA 自身端口(8123), 浏览器访问
-              http://<ha-host>:8123/api/lechange/gt4/slides
-        (不再使用独立 8765 监听器 — 容器部署免端口映射)
+        两阶段: ① 显示滑块页 URL 表单 → 用户在浏览器完成滑块, 四元组回传后
+        CheckGeeTest4 + 重发短信(回调 _on_gt4_tuple 设置 _gt4_done);
+        ② 用户点提交 → 等待 _gt4_done(通常已就绪) → 回到短信输码。
         """
-        # 全局 listener(async_setup 已注册 view 到 HA 8123)
         listener = self.hass.data[DOMAIN].get("gt4_listener")
         if listener is None:
             return self.async_abort(reason="gt4_unavailable")
-        # 绑定本次 flow 的回调(四元组 → CheckGeeTest4 → 重发短信)
-        listener._on_tuple = self._on_gt4_tuple
+        if user_input is not None:
+            # ② 等待滑块+短信完成(回调设置 _gt4_done); 超时 abort; 成功回到短信输入
+            try:
+                if self._gt4_done is not None:
+                    await asyncio.wait_for(self._gt4_done.wait(), timeout=300)
+            except asyncio.TimeoutError:
+                listener.clear_callback(self._gt4_token)
+                return self.async_abort(reason="gt4_timeout")
+            if self._gt4_error:
+                listener.clear_callback(self._gt4_token)
+                return self.async_abort(reason="gt4_failed")
+            # _on_gt4_tuple 已重发短信 → 直接展示输码表单, 不再重复发送
+            self._sms_already_sent = True
+            return self.async_show_form(
+                step_id="sms", data_schema=SMS_CODE_SCHEMA,
+                description_placeholders={"username": self._username},
+            )
+        # ① 一次性挑战令牌: 页面注入 + 回传校验 + 按 flow 路由(并发多流程互不覆盖)
+        self._gt4_token = f"{self.flow_id}-{uuid.uuid4().hex[:16]}"
+        listener.set_callback(self._gt4_token, self._on_gt4_tuple)
         # 生成滑块页(相对路径回传 — 反代/HTTPS 自动跟随)
         listener.html_for(
             account_label=self._username,
             verify_token="",            # 空串: CheckGeeTest4 接受空串
             usage=self._gt4_usage,
             endpoint="/api/lechange/gt4/tuple",
+            token=self._gt4_token,
         )
+        self._gt4_done = asyncio.Event()
+        self._gt4_error = ""
+        self._sms_already_sent = False
         return self.async_show_form(
             step_id="gt4",
             description_placeholders={
-                "url": "/api/lechange/gt4/slides",
+                "url": f"/api/lechange/gt4/slides?token={self._gt4_token}",
             },
         )
 
@@ -295,18 +318,6 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if self._gt4_done is not None:
                 self._gt4_done.set()
 
-    async def async_step_gt4_wait(self, user_input: Optional[dict] = None) -> FlowResult:
-        """等待滑块+短信完成(用户输码后回到 sms 步骤)."""
-        if self._gt4_done is not None:
-            try:
-                await asyncio.wait_for(self._gt4_done.wait(), timeout=180)
-            except asyncio.TimeoutError:
-                return self.async_abort(reason="gt4_timeout")
-        if self._gt4_error:
-            return self.async_abort(reason="gt4_failed")
-        # GT4 通过 + 短信已发 → 回到短信输入步骤
-        return await self.async_step_sms()
-
     async def _after_login(self, login_data: dict) -> FlowResult:
         """登录成功 → 持久化自有 sid → 拉取设备列表 → 设备选择."""
         # 记住自有 sid(有登录史 → 后续密码 GetToken 永远直通)
@@ -319,8 +330,10 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raise ImouAPIError(-4, "no devices")
         self._login_data = login_data
         self._devices = devices
-        # HA view 形态: view 挂在 HA 8123 上, 不需要 stop(页面仍在但无害)
-        self._gt4_listener = None
+        # 清理 GT4 挑战回调(单次挑战已消费; 防泄漏/重放)
+        listener = self.hass.data[DOMAIN].get("gt4_listener")
+        if listener is not None and self._gt4_token:
+            listener.clear_callback(self._gt4_token)
         return await self.async_step_device()
 
     async def async_step_device(self, user_input: Optional[dict] = None) -> FlowResult:
@@ -379,12 +392,13 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="device", data_schema=schema)
 
     @staticmethod
-    def async_get_options_flow(config_entry):
+    def async_get_options_flow(config_entry: ConfigEntry) -> "LeChangeOptionsFlowHandler":
         return LeChangeOptionsFlowHandler(config_entry)
 
-    def async_migrate_entry(self, entry) -> bool:
-        """Old OpenAPI-based entries cannot be migrated automatically."""
-        return False
+
+def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Old OpenAPI-based entries cannot be migrated automatically."""
+    return False
 
 
 class LeChangeOptionsFlowHandler(config_entries.OptionsFlow):

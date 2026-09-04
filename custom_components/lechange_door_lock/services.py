@@ -7,6 +7,7 @@ temporary password (snapkey) management on the client-side cloud API.
 from __future__ import annotations
 
 import logging
+import os
 
 import voluptuous as vol
 
@@ -36,6 +37,7 @@ from .const import (
     SERVICE_SET_VOICE_REPLY,
     SERVICE_WAKE_UP_DEVICE,
 )
+from .coordinator import LeChangeDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,14 +80,6 @@ VOICE_REPLY_SET_SCHEMA = vol.Schema(
     }
 )
 
-EFFECT_PERIOD_SCHEMA = vol.Schema(
-    {
-        vol.Required("period"): vol.All(vol.Coerce(int), vol.Range(min=0, max=6)),
-        vol.Required("beginTime"): cv.string,
-        vol.Required("endTime"): cv.string,
-    }
-)
-
 CREATE_SNAPKEY_SCHEMA = vol.Schema(
     {
         vol.Required("device_id"): cv.string,
@@ -95,9 +89,6 @@ CREATE_SNAPKEY_SCHEMA = vol.Schema(
         ),
         vol.Optional("number", default=1): vol.All(
             vol.Coerce(int), vol.Range(min=-1, max=255)
-        ),
-        vol.Optional("effect_period", default=[]): vol.All(
-            cv.ensure_list, [EFFECT_PERIOD_SCHEMA]
         ),
     }
 )
@@ -186,10 +177,10 @@ CALL_SERVICE_SCHEMA = vol.Schema(
 
 
 def _get_coordinator(hass: HomeAssistant, device_id: str):
-    """Find the coordinator by device_id."""
-    for coordinator in hass.data.get(DOMAIN, {}).values():
-        if coordinator.device_id == device_id:
-            return coordinator
+    """Find the coordinator by device_id (skip non-coordinator data keys)."""
+    for value in hass.data.get(DOMAIN, {}).values():
+        if isinstance(value, LeChangeDataUpdateCoordinator) and value.device_id == device_id:
+            return value
     return None
 
 
@@ -331,9 +322,6 @@ async def async_create_snapkey(call: ServiceCall):
         "begin_time": "00:00:00",
         "end_time": "23:59:59",
     }
-    if call.data.get("effect_period"):
-        # 兼容旧参数:星期/时间段由 effect_period 推断(未归一时按默认每天处理)
-        _LOGGER.debug("effect_period provided, using default weekday mapping")
     result = await coordinator.async_create_snapkey_cloud(config)
     coordinator.set_snapkey_result(result)
     _fire_event(hass, "snapkey_created", device_id, result=result)
@@ -418,8 +406,9 @@ async def async_authorize_terminal(call: ServiceCall):
 
 
 def _first_coordinator(hass: HomeAssistant):
-    for coordinator in hass.data.get(DOMAIN, {}).values():
-        return coordinator
+    for value in hass.data.get(DOMAIN, {}).values():
+        if isinstance(value, LeChangeDataUpdateCoordinator):
+            return value
     return None
 
 
@@ -459,14 +448,18 @@ async def async_call_service(call: ServiceCall):
 
 
 # ------------------------------------------------------------- 媒体
-def _save_www_image(hass: HomeAssistant, filename: str, data: bytes) -> str | None:
-    """保存图片到 <config>/www/lechange_door_lock/, 返回 /local/ URL;失败返回 None。"""
-    import os
-
+def _save_www(
+    hass: HomeAssistant,
+    filename: str,
+    data: bytes,
+    *,
+    image: bool = False,
+) -> str | None:
+    """保存文件到 <config>/www/lechange_door_lock/, 返回 /local/ URL;失败返回 None。"""
     safe = os.path.basename(filename.strip().replace("\\", "/")) or ""
     if not safe:
         return None
-    if not safe.lower().endswith(".jpg"):
+    if image and not safe.lower().endswith(".jpg"):
         safe += ".jpg"
     www_dir = hass.config.path("www", "lechange_door_lock")
     try:
@@ -476,26 +469,7 @@ def _save_www_image(hass: HomeAssistant, filename: str, data: bytes) -> str | No
             f.write(data)
         return f"/local/lechange_door_lock/{safe}"
     except OSError as err:
-        _LOGGER.warning("保存图片到 www 失败: %s", err)
-        return None
-
-
-def _save_www_file(hass: HomeAssistant, filename: str, data: bytes) -> str | None:
-    """保存任意文件(预览视频 h264/h265)到 www, 返回 /local/ URL。"""
-    import os
-
-    safe = os.path.basename(filename.strip().replace("\\", "/")) or ""
-    if not safe:
-        return None
-    www_dir = hass.config.path("www", "lechange_door_lock")
-    try:
-        os.makedirs(www_dir, exist_ok=True)
-        path = os.path.join(www_dir, safe)
-        with open(path, "wb") as f:
-            f.write(data)
-        return f"/local/lechange_door_lock/{safe}"
-    except OSError as err:
-        _LOGGER.warning("保存预览到 www 失败: %s", err)
+        _LOGGER.warning("保存文件到 www 失败: %s", err)
         return None
 
 
@@ -534,7 +508,7 @@ async def async_doorfront_snapshot(call: ServiceCall):
     url = None
     if call.data.get("filename"):
         url = await hass.async_add_executor_job(
-            _save_www_image, hass, call.data["filename"], jpeg
+            _save_www, hass, call.data["filename"], jpeg, image=True
         )
     _fire_event(
         hass,
@@ -565,7 +539,7 @@ async def async_record_preview_service(call: ServiceCall):
     ext = "h265" if codec == "h265" else "h264"
     filename = call.data.get("filename") or f"preview_{ext}"
     url = await hass.async_add_executor_job(
-        _save_www_file, hass, filename, video
+        _save_www, hass, filename, video
     )
     _fire_event(
         hass,
@@ -621,7 +595,7 @@ async def async_alarm_image(call: ServiceCall):
     url = None
     if call.data.get("filename"):
         url = await hass.async_add_executor_job(
-            _save_www_image, hass, call.data["filename"] or f"alarm_{alarm.get('alarmId')}", jpeg
+            _save_www, hass, call.data["filename"] or f"alarm_{alarm.get('alarmId')}", jpeg, image=True
         )
     _fire_event(
         hass,

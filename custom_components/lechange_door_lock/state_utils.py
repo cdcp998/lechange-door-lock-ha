@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from .const import KEY_TYPE_NAMES, WEEKDAYS, WEEKDAY_TO_PERIOD
+from .const import KEY_TYPE_NAMES, WEEKDAY_TO_PERIOD
 
 LOCK_STATE_CLOSED = "beClosed"
 LOCK_STATE_OPENED_KEYS = {"beOpened", "beAjar"}

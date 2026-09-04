@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import logging
-
 from homeassistant.components.select import SelectEntity
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     CONF_DEVICE_ID,
@@ -14,19 +15,16 @@ from .const import (
     DEFAULT_SNAPSHOT_CHANNELS,
     DEFAULT_SNAPSHOT_LAYOUT,
     DOMAIN,
-    LAYOUT_HSTACK,
-    LAYOUT_SINGLE,
-    LAYOUT_VSTACK,
     SNAPSHOT_CHANNEL_OPTIONS,
     SNAPSHOT_LAYOUT_OPTIONS,
     SNAPKEY_WEEKDAY_OPTIONS,
 )
 from .entity import LeChangeEntity
 
-_LOGGER = logging.getLogger(__name__)
 
-
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+):
     """Set up weekday select + doorfront snapshot channel/layout selects."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     device_id = entry.data[CONF_DEVICE_ID]
@@ -36,7 +34,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
             LeChangeSnapshotChannelSelect(coordinator, device_id),
             LeChangeSnapshotLayoutSelect(coordinator, device_id),
         ],
-        True,
     )
 
 

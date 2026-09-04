@@ -23,6 +23,11 @@
           "valid_code": "SMS code (6 digits)"
         }
       },
+      "gt4": {
+        "title": "Human verification (GT4 slider)",
+        "description": "Open **{url}** in a browser, complete the slider, then come back here and click Submit. The SMS code will be sent automatically.",
+        "data": {}
+      },
       "device": {
         "title": "Select Device",
         "description": "Select the lock device and enter the device credential pair.\n\n**Security code**: the 8-character uppercase alphanumeric code printed next to the QR/barcode on the device label (battery compartment), also shown in App > Device settings > About, or on the box.\n\n**Device password**: the current password after changing it in the LeChange app; if never changed it equals the security code — **leave empty**.\n\nUsed for: alarm snapshot decryption (security code) and live-stream frame decryption (device password). Stored locally only.",
@@ -44,7 +49,10 @@
     },
     "abort": {
       "already_configured": "Device is already configured.",
-      "device_not_found": "Selected device was not found."
+      "device_not_found": "Selected device was not found.",
+      "gt4_unavailable": "GT4 slider service is not available. Restart Home Assistant and retry.",
+      "gt4_timeout": "GT4 slider timed out (no valid tuple received within 5 minutes).",
+      "gt4_failed": "GT4 verification failed. Check the log for details and retry."
     }
   },
   "options": {

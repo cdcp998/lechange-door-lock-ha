@@ -10,9 +10,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from typing import Any, Awaitable, Callable, Optional
+import time
+from typing import Awaitable, Callable
 
 from .imou_client import ImouAPIError, ImouClient
 from .mqtt_client import MqttClient, _build_head
@@ -82,11 +82,15 @@ class MqttManager:
         while True:
             try:
                 await self.async_ensure_connected()
-                # 连接成功: 保持(等待断开或凭据过期)
+                # 连接成功: 保持(等待凭据过期; 底层断线由 MqttClient 内部标记)
                 while self._connected:
                     await asyncio.sleep(5)
                     # 定期刷新凭据(token 可能过期)
-                    if time_monotonic() - self._creds_at > REFRESH_INTERVAL:
+                    if time.monotonic() - self._creds_at > REFRESH_INTERVAL:
+                        await self.async_reconnect()
+                    # 底层连接已断(manager 标志未感知) → 主动重连
+                    elif self._mqtt and not self._mqtt.connected:
+                        _LOGGER.warning("MQTT connection lost; reconnecting")
                         await self.async_reconnect()
                 delay_idx = 0
             except asyncio.CancelledError:
@@ -131,7 +135,7 @@ class MqttManager:
 
     # ------------------------------------------------------------------ creds
     async def _get_creds(self) -> dict:
-        now = time_monotonic()
+        now = time.monotonic()
         if self._last_creds and (now - self._creds_at) < REFRESH_INTERVAL:
             return self._last_creds
         creds = await self.api.async_get_mqtt_credentials()
@@ -178,9 +182,3 @@ class MqttManager:
             await self.on_event({"topic": topic, "msg": msg})
         except Exception:  # noqa: BLE001
             _LOGGER.exception("MQTT event handler failed")
-
-
-def time_monotonic() -> float:
-    import time
-
-    return time.monotonic()

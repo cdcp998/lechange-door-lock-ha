@@ -5,42 +5,42 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    CONF_DEVICE_ID,
     DOMAIN,
     EVENT_PREFIX,
     PROP_CALL_TRANSFER,
     PROP_CHILD_LOCK,
 )
+from .entity import LeChangeEntity
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+):
     """Set up switch entities."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    device_id = entry.data["device_id"]
+    device_id = entry.data[CONF_DEVICE_ID]
     entities = [
         LeChangeChildLockSwitch(coordinator, device_id),
         LeChangeCallTransferSwitch(coordinator, device_id),
     ]
-    async_add_entities(entities, True)
+    async_add_entities(entities)
 
 
-class _BaseLeChangeSwitch(CoordinatorEntity, SwitchEntity):
-    _attr_has_entity_name = True
-
+class _BaseLeChangeSwitch(LeChangeEntity, SwitchEntity):
     def __init__(
-        self, coordinator, device_id: str, translation_key: str, prop: str, is_enum: bool = False
+        self, coordinator, device_id: str, translation_key: str, prop: str
     ) -> None:
-        super().__init__(coordinator)
-        self._device_id = device_id
+        super().__init__(coordinator, device_id, translation_key)
         self._prop = prop
-        self._is_enum = is_enum
-        self._attr_translation_key = translation_key
-        self._attr_unique_id = f"{device_id}_{translation_key}"
-        self._attr_device_info = {"identifiers": {(DOMAIN, device_id)}}
 
     def _value(self):
         return (self.coordinator.data or {}).get("props", {}).get(self._prop)
@@ -54,14 +54,16 @@ class _BaseLeChangeSwitch(CoordinatorEntity, SwitchEntity):
 
     async def _set_on(self, on: bool) -> None:
         coordinator = self.coordinator
-        if self._is_enum:
-            # enum 属性与设备返回形态一致:字符串 "1"/"0"
-            value = "1" if on else "0"
-        else:
-            value = on
-        await coordinator.api.async_set_properties(
-            coordinator.device_id, coordinator.product_id, {self._prop: value}
-        )
+        # bool/enum 属性统一发 "1"/"0"(设备模型 _encode_value 对 bool 亦转 1/0,
+        # 但部分设备把属性声明为 int: 发 "1"/"0" 最稳)
+        value = "1" if on else "0"
+        try:
+            await coordinator.api.async_set_properties(
+                coordinator.device_id, coordinator.product_id, {self._prop: value}
+            )
+        except Exception as err:
+            _LOGGER.warning("属性 %s 设置失败: %s", self._prop, err)
+            raise HomeAssistantError(f"设置 {self._prop} 失败: {err}") from err
         coordinator.hass.bus.async_fire(
             EVENT_PREFIX,
             {"type": "set_property", "device_id": self._device_id,
@@ -88,7 +90,7 @@ class LeChangeCallTransferSwitch(_BaseLeChangeSwitch):
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(
-            coordinator, device_id, "call_transfer", PROP_CALL_TRANSFER, is_enum=True
+            coordinator, device_id, "call_transfer", PROP_CALL_TRANSFER
         )
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import uuid
 from datetime import timedelta
 from typing import Any, Optional
@@ -47,6 +48,7 @@ from .state_utils import (
     derive_lock_state,
     extract_batteries,
     normalize_wifi,
+    _int_or_none,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -349,10 +351,8 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
 
         成功后返回 {"name", "key": tempKey, ...} 供结果展示。
         """
-        import random as _random
-
         config = config or self.snapkey_config
-        temp_key = f"{_random.randint(0, 99999999):08d}"
+        temp_key = f"{random.randint(0, 99999999):08d}"
         usage_period = build_usage_period(
             str(config.get("weekday_mode", "Every day")),
             int(config.get("effective_day", 1)),
@@ -418,12 +418,12 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         """IoT 控制统一入口: MQTT 优先 → 云 API 兜底.
 
         payload 需已 ref 编码(调用方用 model 编码); 返回 dict, 带 "via" 标记。
-        MQTT 未连接/超时 → 云 API(imou_client.async_post); 均失败抛异常。
+        MQTT 未连接/超时 → 云 API(imou_client.async_post); 业务错误直接抛异常。
         """
         try:
             return await self.mqtt.async_request(api, payload)
         except ImouAPIError:
-            raise
+            raise  # MQTT 业务错误(设备离线等): 不兜底, 交由调用方处理
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("MQTT control failed (%s); falling back to cloud", err)
             data = await self.api.async_post(api, payload)
@@ -486,14 +486,3 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             self._device_info_update_unsub()
             self._device_info_update_unsub = None
         await self.mqtt.async_stop()
-
-
-def _int_or_none(value: Any) -> Optional[int]:
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None

@@ -94,9 +94,6 @@ create_snapkey:
     number:
       name: Use limit
       description: Times the key can be used (-1 unlimited / 1-255).
-    effect_period:
-      name: Effect period
-      description: "List with period (0=Sunday..6=Saturday), beginTime, endTime."
 
 get_snapkey_list:
   name: Get temporary password list

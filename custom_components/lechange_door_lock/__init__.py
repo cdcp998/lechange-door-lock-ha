@@ -27,14 +27,13 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the integration (called by HA with configuration.yaml)."""
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN].setdefault("gt4_listeners", {})
 
     # GT4 本地滑块: 注册 HA 原生 view(挂在 HA 自身 HTTP 端口, 容器部署零配置).
-    # 页面: GET /api/lechange/gt4/slides (config_flow 生成时缓存 HTML)
-    # 回传: POST /api/lechange/gt4/tuple (requires_auth=False, 四元组单次有效)
+    # 页面: GET /api/lechange/gt4/slides?token=... (config_flow 生成时缓存)
+    # 回传: POST /api/lechange/gt4/tuple (requires_auth=False, 一次性 token 校验)
     from .gt4_helper import GT4TupleListener, build_ha_views
 
-    listener = GT4TupleListener()  # 无回调: config_flow 在用时注入
+    listener = GT4TupleListener()  # 回调由 config_flow 按 token 注入
     for view in build_ha_views(listener):
         hass.http.register_view(view)
     hass.data[DOMAIN]["gt4_listener"] = listener
@@ -47,7 +46,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug("Starting async_setup_entry for device %s", entry.data[CONF_DEVICE_ID])
 
     coordinator = LeChangeDataUpdateCoordinator(hass, entry)
-    await coordinator.async_config_entry_first_refresh()
+    # 先存入 hass.data: 首刷失败/中断时 async_unload_entry 也能找到并清理
+    hass.data[DOMAIN][entry.entry_id] = coordinator
+
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except Exception:
+        await coordinator.async_shutdown()
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+        raise
     _LOGGER.debug("Coordinator first refresh completed")
 
     # 注册设备
@@ -67,8 +74,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # MQTT 实时通道: 后台连接, 断线自动重试; 失败不影响轮询
     await coordinator.async_start_mqtt()
-
-    hass.data[DOMAIN][entry.entry_id] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 

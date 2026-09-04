@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
 
 from .const import (
     CHANNELS_DUAL,
@@ -38,6 +39,7 @@ from .dav_codec import derive_key as dav_derive_key, media_bytes_to_jpeg
 from .rtsv import (
     RtsvStreamSession,
     StreamError,
+    _find_cjk_font,
     async_h264_snapshot,
     async_osd_h264,
     derive_stream_key,
@@ -45,7 +47,7 @@ from .rtsv import (
     overlay_osd,
     vstack_jpegs,
 )
-from .streams import parse_channel_hosts
+from .streams import parse_channel_hosts, split_host_port, is_lan_host
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -90,10 +92,16 @@ class MediaManager:
 
     def __init__(self, coordinator):
         self.coordinator = coordinator
-        self._snapshot_lock = asyncio.Lock()
+        self._snapshot_lock: asyncio.Lock | None = None
         self._last_snapshot: tuple[float, bytes] = (0.0, b"")
         self._stream_key: bytes | None = None
         self._dav_key: bytes | None = None
+
+    async def _get_snapshot_lock(self) -> asyncio.Lock:
+        """惰性创建锁(避免在非事件循环上下文绑定 loop)."""
+        if self._snapshot_lock is None:
+            self._snapshot_lock = asyncio.Lock()
+        return self._snapshot_lock
 
     # ---- 凭据(options 覆盖 entry.data;设备密码留空回退安全码) --------------
     def _cred(self, key: str) -> str:
@@ -206,8 +214,6 @@ class MediaManager:
 
     def channel_local_addr(self, channel_id: str) -> tuple[str, int] | None:
         """通道本地 (host, port); 未配置/非 LAN 返回 None。"""
-        from .streams import split_host_port, is_lan_host
-
         raw = self.channel_hosts.get(str(channel_id), "")
         host, port = split_host_port(raw, 80)
         if not host or not is_lan_host(host):
@@ -245,8 +251,7 @@ class MediaManager:
 
     async def async_alarm_jpeg_bytes(self, raw: bytes) -> bytes | None:
         """原始 DAV/JPEG 字节 → JPEG(供 LAN 快照/告警图共用)。"""
-        dav_key = await self.async_dav_key()
-        if dav_key is None:
+        if not self.security_code:
             _LOGGER.warning("媒体解码跳过: 未配置安全码")
             return None
         loop = asyncio.get_running_loop()
@@ -296,8 +301,6 @@ class MediaManager:
                     label = str(raw) if str(raw).strip() else ""
                     break
         if label and any("\u4e00" <= c <= "\u9fff" for c in label):
-            from .rtsv import _find_cjk_font
-
             if _find_cjk_font() is None:
                 label = ""
         return label or ("CH" + str(channel_id))
@@ -350,7 +353,7 @@ class MediaManager:
         ts, cached = self._last_snapshot
         if not force and cached and now - ts < self.snapshot_min_interval:
             return cached
-        async with self._snapshot_lock:
+        async with await self._get_snapshot_lock():
             # 双检:等锁期间别人可能刚刷过
             now = time.monotonic()
             ts, cached = self._last_snapshot
@@ -384,7 +387,7 @@ class MediaManager:
         if not stream_key:
             _LOGGER.warning("实时预览跳过: 未配置安全码/设备密码")
             return None, "h264"
-        async with self._snapshot_lock:
+        async with await self._get_snapshot_lock():
             coord = self.coordinator
             was_sleeping = bool((coord.data or {}).get("sleeping"))
 
@@ -511,17 +514,7 @@ class MediaManager:
         # OSD 合成(背景全透明, 白字+描边; 无遮画面黑底框):
         #   拼接后统一绘制: 时间戳整图左上 + 通道名各分区右下。
         # 这样 CH0 标签在左画面、CH1 标签在右画面(上下布局同理), 对应各通道位置。
-        osd_on = self.snapshot_osd if want_osd is None else (bool(want_osd))
         if osd_on:
-            from datetime import datetime
-
-            ch_names = (coord.data or {}).get("channel_names") or {}
-            labels = []
-            for ch in channel_ids[: len(frames)]:
-                if len(frames) == 1:
-                    labels.append(ch_names.get(ch) or "CH" + ch)
-                else:
-                    labels.append(("CH%s %s" % (ch, ch_names.get(ch) or "")).strip())
             # 同步截图/预览命名: 统一 _channel_label(用户命名/字体回退)
             labels = [self._channel_label(ch) for ch in channel_ids[: len(frames)]]
             loop = asyncio.get_running_loop()

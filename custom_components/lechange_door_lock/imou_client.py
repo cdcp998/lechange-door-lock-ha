@@ -49,7 +49,7 @@ import ssl
 import string
 import time
 import uuid as _uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import aiohttp
@@ -962,11 +962,8 @@ class ImouClient:
         服务端约束:keyId 随机、tempKey 8 位、createTime/expiredTime 必须真实 epoch 秒、
         type=3、usagePeriod 周位图(127=整周)。
         """
-        import random as _random
-        import time as _time
-
-        now = _time.time()
-        key_id = key_id if key_id else _random.randint(10000000, 999999999)
+        now = time.time()
+        key_id = key_id if key_id else random.randint(10000000, 999999999)
         payload = {
             "productId": product_id,
             "deviceId": device_id,
@@ -1016,8 +1013,6 @@ class ImouClient:
 
         设备休眠时云侧消息照常返回;返回 data.alarms[](alarmId/labelType/refId/time/message)。
         """
-        from datetime import datetime, timedelta, timezone
-
         now = datetime.now(timezone.utc) + timedelta(hours=8)  # 设备时区 UTC+8
         end_day = now.strftime("%Y%m%d") + "T235959"
         begin_day = (now - timedelta(weeks=4)).strftime("%Y%m%d") + "T000000"

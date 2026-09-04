@@ -1,4 +1,4 @@
-"""Shared entity base for the LeChange integration (no HA runtime needed)."""
+"""Shared entity base for the LeChange integration."""
 
 from __future__ import annotations
 
@@ -18,8 +18,3 @@ class LeChangeEntity(CoordinatorEntity):
         self._attr_unique_id = f"{device_id}_{key}"
         self._attr_translation_key = key
         self._attr_device_info = {"identifiers": {(DOMAIN, device_id)}}
-
-    @property
-    def data(self) -> dict:
-        """Coordinator data with an empty-dict fallback."""
-        return self.coordinator.data or {}
