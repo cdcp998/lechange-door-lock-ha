@@ -14,6 +14,8 @@ import homeassistant.helpers.config_validation as cv
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.exceptions import NoURLAvailableError
+from homeassistant.helpers.network import get_url
 
 from .const import (
     DOMAIN,
@@ -236,6 +238,24 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={"username": self._username},
         )
 
+    def _gt4_slider_url(self, path: str) -> str:
+        """解析完整可点击的滑块页 URL(外网 → 内网 → 云备份 → 任意可用)。
+
+        相对路径在 HA 前端不可点击; 用户需要完整 URL(手机/另一台电脑打开)。
+        全部不可用时回退相对路径(同源仍可用)。
+        """
+        for kwargs in (
+            {"allow_cloud": False, "prefer_external": True},
+            {"allow_cloud": False, "prefer_external": False},
+            {"allow_cloud": True, "prefer_external": True},
+            {},
+        ):
+            try:
+                return get_url(self.hass, path=path, **kwargs)
+            except NoURLAvailableError:
+                continue
+        return path
+
     # ------------------------------------------------------------- GT4
     async def async_step_gt4(self, user_input: Optional[dict] = None) -> FlowResult:
         """本地 GT4 滑块流程: HA view 渲染滑块页(8123端口, 容器零配置), 用户滑块后自动接力.
@@ -282,10 +302,13 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._gt4_done = asyncio.Event()
         self._gt4_error = ""
         self._sms_already_sent = False
+        slider_path = f"/api/lechange/gt4/slides?token={self._gt4_token}"
         return self.async_show_form(
             step_id="gt4",
             description_placeholders={
-                "url": f"/api/lechange/gt4/slides?token={self._gt4_token}",
+                "url": slider_path,
+                # 完整可点击链接(HA 前端 description 支持 Markdown 渲染)
+                "url_link": f"[{slider_path}]({self._gt4_slider_url(slider_path)})",
             },
         )
 

@@ -25,7 +25,7 @@
       },
       "gt4": {
         "title": "Human verification (GT4 slider)",
-        "description": "Open **{url}** in a browser, complete the slider, then come back here and click Submit. The SMS code will be sent automatically.",
+        "description": "Open the slider page via this link: {url_link}\n\nComplete the slider, then come back here and click Submit. The SMS code will be sent automatically.\n\n(If the link doesn't work, append the relative path to your Home Assistant host: {url})",
         "data": {}
       },
       "device": {
