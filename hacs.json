@@ -1,8 +1,10 @@
 {
   "name": "LeChange Door Lock",
+  "domain": "lechange_door_lock",
   "content_in_root": false,
   "render_readme": true,
   "country": ["CN", "US"],
   "zip_release": false,
+  "homeassistant": "2024.1.0",
   "hacs": "2.0.0"
 }
