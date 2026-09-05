@@ -53,6 +53,8 @@ CONF_DEVICE_PASSWORD = "device_password"
 CONF_CHANNEL_HOSTS = "channel_hosts"          # JSON dict: {"0": "192.168.1.10:554", "1": "..."}
 
 # --- 云端媒体(RTSV1 / 快照节流) --------------------------------------------
+CONF_CAMERA_AUTO_IMAGE = "camera_auto_image"   # 摄像头自动取图总开关
+DEFAULT_CAMERA_AUTO_IMAGE = False    # 默认关(取流/CGI 都耗电); 手动服务/按钮不受限
 CONF_SNAPSHOT_MIN_INTERVAL = "snapshot_min_interval"  # 门外截图最小间隔(秒)
 DEFAULT_SNAPSHOT_MIN_INTERVAL = 60   # 电池设备: 默认 60s 节流(取流自带唤醒)
 CONF_SNAPSHOT_STREAM_ID = "snapshot_stream_id"        # 取流码流: '1'主(默认)/'2'子
@@ -97,7 +99,7 @@ CA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs", "dah
 DEFAULT_SCAN_INTERVAL = 30  # seconds
 
 # Platforms
-PLATFORMS = ["sensor", "binary_sensor", "lock", "button", "switch", "camera",
+PLATFORMS = ["sensor", "binary_sensor", "button", "switch", "camera",
              "number", "select", "text", "time"]
 
 # --- services -------------------------------------------------------------
@@ -107,6 +109,8 @@ SERVICE_OPEN_DOOR_REMOTE = "open_door_remote"
 SERVICE_WAKE_UP_DEVICE = "wake_up_device"
 SERVICE_GET_OPEN_DOOR_RECORD = "get_open_door_record"
 SERVICE_DOORFRONT_SNAPSHOT = "doorfront_snapshot"   # 门外截图(云端取流抽帧)
+SERVICE_RELOAD_DATA = "reload_data"                 # 强制重载设备全部数据(持久会话)
+SERVICE_DUMP_DIAGNOSTICS = "dump_diagnostics"       # 诊断转储: 原始响应+解码键清单
 SERVICE_ALARM_IMAGE = "alarm_image"                 # 告警抓拍图下载+解码
 SERVICE_RECORD_PREVIEW = "record_preview"           # 实时预览录制(可选 OSD)
 SERVICE_CALL_ANSWER = "call_answer"
@@ -115,6 +119,7 @@ SERVICE_CALL_HANGUP = "call_hangup"
 SERVICE_GET_VOICE_REPLY = "get_voice_reply"
 SERVICE_SET_VOICE_REPLY = "set_voice_reply"
 SERVICE_SET_PROPERTIES = "set_properties"
+SERVICE_SET_CREDENTIALS = "set_credentials"         # 显式设置/清空安全码/设备密码
 SERVICE_CALL_SERVICE = "call_service"
 SERVICE_DELETE_SNAPKEY = "delete_snapkey"
 SERVICE_SEND_SMS_CODE = "send_sms_code"
@@ -145,8 +150,11 @@ RATE_LIMIT_CODES = {2029, 2030}
 # GT4 captchaId 为乐橙客户端通用公开值;OEM AK/SK 为设备厂商接入凭据,
 # 不随源码分发 — 使用者通过环境变量或 options 提供(留空则 GT4 校验不可用)。
 GT4_CAPTCHA_ID = os.environ.get("LECHANGE_GT4_CAPTCHA_ID", "27e3ebaf32906618c3eb8bc69035903a")
-OEM_AK = os.environ.get("LECHANGE_OEM_AK", "")
-OEM_SK = os.environ.get("LECHANGE_OEM_SK", "")
+# OEM AK/SK: 乐橙客户端内置厂商接入凭据(oem_config_server.lc 解析), 与 GT4_CAPTCHA_ID
+# 同属客户端通用公开值, 此前已随历史发布出库 → 按发布形态内置缺省值, 开箱即用;
+# 环境变量仍可覆盖(多账号/自 research 场景)。
+OEM_AK = os.environ.get("LECHANGE_OEM_AK", "2QnTkhG3^t!rKXNP")
+OEM_SK = os.environ.get("LECHANGE_OEM_SK", "%^k#1DI2gI#hdNK%eb#JPk@nJIxGXV1U")
 # 12114 = 风险态 GT4 拦截(captchaData.verifyToken);
 # 12112 = 终端绑定校验(新终端首登, 走授信链 GrantingCredit)。
 NEED_GT4_CODES = {12114}

@@ -14,6 +14,39 @@ wake_up_device:
       name: Device ID
       description: The device serial number.
 
+reload_data:
+  name: Reload data
+  description: "Force-reload all device data (snapshot + properties + alarms + device-registry calibration). Uses the persisted session via EVERGREEN auto-renewal — no re-login needed."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    wake:
+      name: Wake device first
+      description: "Try to wake the sleeping device before reloading (properties like child lock / WiFi are only readable while the device answers)."
+
+dump_diagnostics:
+  name: Dump diagnostics
+  description: "Dump raw API responses and decoded keys (GetProperties / V2 snapshot / device list) via a lechange_door_lock_event with type=diagnostics. Use when an entity shows unknown/unavailable."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+
+set_credentials:
+  name: Set credentials
+  description: "Explicitly set or erase the security code / device password (verification & recovery; immediate effect). Omit a field to leave it unchanged; pass an empty string to erase. Erasing the device password breaks snapshot/preview decryption unless you never changed it in the app."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+    security_code:
+      name: Security code
+      description: "Set the security code; pass an empty string to erase."
+    device_password:
+      name: Device password
+      description: "Set the device password; pass an empty string to erase (stream decryption falls back to security code)."
+
 call_answer:
   name: Answer doorbell call
   description: "Answer the doorbell call (CallAnswer); user_info comes from the call event."

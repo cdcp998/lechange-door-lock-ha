@@ -14,6 +14,39 @@ wake_up_device:
       name: 设备ID
       description: 设备序列号。
 
+reload_data:
+  name: 重载数据
+  description: 强制重载设备全部数据(设备快照 + IoT 属性 + 云侧告警 + 型号/固件重新标定到设备注册表)。使用持久化会话(EVERGREEN 自动续期),**无需重新登录**。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    wake:
+      name: 先唤醒设备
+      description: 重载前先尝试唤醒休眠设备(童锁/WiFi 等属性仅设备应答时可读)。
+
+dump_diagnostics:
+  name: 诊断转储
+  description: 转储各数据源原始响应与解码结果(GetProperties/V2 快照/设备列表),经 lechange_door_lock_event(type=diagnostics) 事件发出。实体显示"未知/不可用"时用它定位。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+
+set_credentials:
+  name: 设置凭据
+  description: 显式设置/清空安全码与设备密码(验证与恢复专用, 即时生效)。不传字段=不修改; 传空串=清空。清空设备密码会导致截图/预览解密失败(除非从未在 App 改过设备密码)。
+  fields:
+    device_id:
+      name: 设备ID
+      description: 设备序列号。
+    security_code:
+      name: 安全码
+      description: 设置安全码; 传空串=清空。
+    device_password:
+      name: 设备密码
+      description: 设置设备密码; 传空串=清空(流帧解密回退用安全码)。
+
 call_answer:
   name: 应答门铃呼叫
   description: 应答门铃呼叫(CallAnswer),user_info 来自呼叫事件。
@@ -171,13 +204,13 @@ doorfront_snapshot:
       description: 为 true 时无视节流立即截图(耗电,慎用)。
     channels:
       name: 通道选择
-      description: 按次覆盖: '0+1' 双摄 / '0' 仅猫眼 / '1' 仅辅摄; 留空=用配置。
+      description: "按次覆盖: '0+1' 双摄 / '0' 仅猫眼 / '1' 仅辅摄; 留空=用配置。"
     layout:
       name: 布局
-      description: 按次覆盖: 'hstack' 左右 / 'vstack' 上下 / 'single' 单摄。
+      description: "按次覆盖: 'hstack' 左右 / 'vstack' 上下 / 'single' 单摄。"
     osd:
       name: OSD
-      description: 按次覆盖: 'on' / 'off' 时间戳通道标签叠加。
+      description: "按次覆盖: 'on' / 'off' 时间戳通道标签叠加。"
     filename:
       name: 保存文件名
       description: 相对 config/www/lechange_door_lock/ 的文件名(如 morning.jpg);留空不保存,仅发事件。
@@ -208,10 +241,10 @@ record_preview:
       description: 0=用配置时长(默认 10s);上限 60s。
     osd:
       name: OSD
-      description: 'on'=烧录时间戳+通道名, 'off'=不带叠加; 留空=用配置(默认开)。
+      description: "'on'=烧录时间戳+通道名, 'off'=不带叠加; 留空=用配置(默认开)。"
     channel_id:
       name: 通道
-      description: '0' 主摄像头(默认) / '1' 辅摄像头。
+      description: "'0' 主摄像头(默认) / '1' 辅摄像头。"
     filename:
       name: 保存文件名
       description: 相对 config/www/lechange_door_lock/ 的文件名(如 preview.h264)。

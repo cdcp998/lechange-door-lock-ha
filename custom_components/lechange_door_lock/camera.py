@@ -22,6 +22,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    CONF_CAMERA_AUTO_IMAGE,
     CONF_CHANNEL_JSON,
     CONF_DEVICE_ID,
     CONF_RTSP_HOST,
@@ -31,6 +32,7 @@ from .const import (
     CONF_RTSP_URL,
     CONF_RTSP_USERNAME,
     CONF_STREAM_ENTRY,
+    DEFAULT_CAMERA_AUTO_IMAGE,
     DOMAIN,
 )
 from .entity import LeChangeEntity
@@ -122,6 +124,13 @@ class LeChangeCameraEntity(LeChangeEntity, Camera):
         return build_rtsp_url(host, port, user, pw, self._channel_id, subtype)
 
     @property
+    def _auto_image_enabled(self) -> bool:
+        """自动取图总开关(默认开; 关=零自动取图, 手动按钮/服务不受限)。"""
+        return bool(self._options.get(
+            CONF_CAMERA_AUTO_IMAGE, DEFAULT_CAMERA_AUTO_IMAGE
+        ))
+
+    @property
     def supported_features(self) -> CameraEntityFeature:
         """配置了 RTSP/中转源才支持 STREAM(供 HA stream 组件接管)。"""
         if self.stream_source:
@@ -154,7 +163,16 @@ class LeChangeCameraEntity(LeChangeEntity, Camera):
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
-        """门外截图: 局域网 CGI(如配置) → 云端 RTSV1 抽帧(节流)。"""
+        """门外截图(自动路径): 总开关 → 局域网 CGI → 云端 RTSV1 抽帧。
+
+        ★ 全局自动取图开关(camera_auto_image): 关闭后摄像头实体的
+          自动取图链路全部停止 —— 云端取流会唤醒电池锁, 局域网 CGI
+          抓拍同样让设备网络保持活跃(耗电)。手动按钮/服务不受影响。
+        """
+        if not self._auto_image_enabled:
+            # 返回缓存帧(若有), 绝不触碰设备
+            cached = getattr(self.coordinator.media, "_last_snapshot", (0.0, b""))[1]
+            return cached if cached else None
         lan = await self.capture_image_via_options(self.coordinator, self._channel_id)
         if lan:
             return lan

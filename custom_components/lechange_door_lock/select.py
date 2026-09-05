@@ -44,19 +44,25 @@ class LeChangeSnapkeyWeekdaySelect(LeChangeEntity, SelectEntity):
         super().__init__(coordinator, device_id, "snapkey_weekday_mode")
         self._attr_entity_category = EntityCategory.CONFIG
         self._attr_options = list(SNAPKEY_WEEKDAY_OPTIONS)
-        value = coordinator.snapkey_config.get("weekday_mode", "Every day")
-        self._attr_current_option = value if value in self._attr_options else "Every day"
+
+    @property
+    def current_option(self) -> str:
+        value = self.coordinator.snapkey_config.get("weekday_mode", "Every day")
+        return value if value in self._attr_options else "Every day"
 
     async def async_select_option(self, option: str) -> None:
         if option not in self._attr_options:
             return
-        self._attr_current_option = option
         self.coordinator.update_snapkey_config(weekday_mode=option)
         self.async_write_ha_state()
 
 
 class _LeChangeSnapshotSelect(LeChangeEntity, SelectEntity):
-    """门外截图选择基类: 持久化到 entry.options, 供 MediaManager 实时读取。"""
+    """门外截图选择基类: 持久化到 entry.options, 供 MediaManager 实时读取。
+
+    current_option 动态读 entry.options(不缓存) —— 集成配置页与 select
+    实体写的是同一个键, 双入口编辑永远显示同一当前值(改完无需重载)。
+    """
 
     _attr_entity_category = EntityCategory.CONFIG
 
@@ -64,16 +70,16 @@ class _LeChangeSnapshotSelect(LeChangeEntity, SelectEntity):
         super().__init__(coordinator, device_id, f"snapshot_{config_key}")
         self._attr_options = list(options)
         self._config_key = config_key
-        self._attr_current_option = self._stored_or(default)
+        self._default = default
 
-    def _stored_or(self, default: str) -> str:
-        stored = str((self.coordinator.entry.options or {}).get(self._config_key, default))
-        return stored if stored in self._attr_options else default
+    @property
+    def current_option(self) -> str:
+        stored = str((self.coordinator.entry.options or {}).get(self._config_key, self._default))
+        return stored if stored in self._attr_options else self._default
 
     async def async_select_option(self, option: str) -> None:
         if option not in self._attr_options:
             return
-        self._attr_current_option = option
         self.coordinator.update_media_options(**{self._config_key: option})
         self.async_write_ha_state()
 

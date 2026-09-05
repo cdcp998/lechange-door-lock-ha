@@ -19,7 +19,7 @@ from .mqtt_client import MqttClient, _build_head
 
 _LOGGER = logging.getLogger(__name__)
 
-RECONNECT_DELAYS = (5, 10, 30, 60)  # 指数退避
+RECONNECT_DELAYS = (5, 10, 30, 60, 120, 300, 600)  # 指数退避(封顶 10 分钟)
 REFRESH_INTERVAL = 60 * 60          # 每小时后重取凭据(token 过期)
 
 
@@ -95,8 +95,18 @@ class MqttManager:
                 delay_idx = 0
             except asyncio.CancelledError:
                 raise
+            except ImouAPIError as err:
+                # 登录会话失效类(12001/12112): 重连无意义(云 API 主通道照常),
+                # 降噪为 info 避免刷屏; 12112 已由 client 触发 reauth 引导
+                _LOGGER.info(
+                    "MQTT channel unavailable (session error %s) — "
+                    "cloud API remains primary; retry in %ss",
+                    err.code, RECONNECT_DELAYS[delay_idx],
+                )
+                await asyncio.sleep(RECONNECT_DELAYS[delay_idx])
+                delay_idx = min(delay_idx + 1, len(RECONNECT_DELAYS) - 1)
             except Exception as err:  # noqa: BLE001
-                _LOGGER.warning("MQTT loop error: %s; retry in %ss", err,
+                _LOGGER.debug("MQTT loop error: %s; retry in %ss", err,
                                 RECONNECT_DELAYS[delay_idx])
                 await asyncio.sleep(RECONNECT_DELAYS[delay_idx])
                 delay_idx = min(delay_idx + 1, len(RECONNECT_DELAYS) - 1)
@@ -121,7 +131,16 @@ class MqttManager:
                 certs_dir=self.certs_dir,
                 on_message=self._on_message,
             )
-            await mqtt.async_connect()
+            try:
+                await mqtt.async_connect()
+            except Exception:
+                # ★ 连接失败 → 凭据缓存立即作废:
+                # 服务端拒连(TLS 后断开/认证拒绝)多因凭据过期/被吊销,
+                # 若继续沿用 1h 缓存, 循环会拿同一坏凭据重试到天荒地老。
+                # 作废后下次重试强制向云 API 取新凭据(带 EVERGREEN 续期)。
+                self._last_creds = {}
+                self._creds_at = 0.0
+                raise
             self._mqtt = mqtt
             self._connected = True
             _LOGGER.info("MQTT channel ready (cid=%s)", creds.get("clientId", "")[:20])
@@ -182,3 +201,127 @@ class MqttManager:
             await self.on_event({"topic": topic, "msg": msg})
         except Exception:  # noqa: BLE001
             _LOGGER.exception("MQTT event handler failed")
+
+
+# ==================================================================== 账号级枢纽
+def extract_device_id(msg: dict) -> str:
+    """从推送消息中尽力提取 deviceId(探测多种已知/疑似嵌套形态).
+
+    账号级 MQTT 主题(iot_response/iot_request/android_iot_property)是
+    全账号广播: 一个连接会收到该账号下所有设备的推送。没有 deviceId
+    归属就无法判断消息属于哪个条目 —— 多设备场景必须先归属再分发,
+    否则 A 条目会把 B 设备的属性合并进自己的实体(数据干扰)。
+    """
+    if not isinstance(msg, dict):
+        return ""
+    params = msg.get("params")
+    data = msg.get("data")
+    containers = (
+        msg,
+        data if isinstance(data, dict) else None,
+        params if isinstance(params, dict) else None,
+        msg.get("content") if isinstance(msg.get("content"), dict) else None,
+        (params.get("data") if isinstance(params, dict) else None)
+        if isinstance(params, dict)
+        else None,
+        (data.get("params") if isinstance(data, dict) else None)
+        if isinstance(data, dict)
+        else None,
+    )
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for key in ("deviceId", "deviceID", "devId"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+class AccountMqttHub:
+    """账号级 MQTT 通道枢纽: 同账号所有设备条目共用一条 MQTT 连接.
+
+    对齐真机 App 形态 —— 一个账号一条长连接, 全部设备的推送都在这条
+    连接上到达。多条目各自建连时 clientId 由 terminal 派生(相同)会
+    互相接管踢线;单连接 + 按 deviceId 分发从根上消除该干扰。
+
+    - start_for/stop_for: 各条目 coordinator 注册/注销自己的归属
+    - 推送路由: extract_device_id 归属 → 分发给注册的 coordinator;
+      无法归属/无人认领的推送一律丢弃(宁可轮询补齐, 不做错误合并)
+    - iot_response: 自己请求的响应由 MqttClient 按 seq 匹配消费;
+      到达 on_event 的都是异条目请求的响应/超时残响 → 一律丢弃
+    """
+
+    def __init__(self, api: ImouClient, certs_dir: str = "", manager: "MqttManager | None" = None) -> None:
+        self._manager = manager or MqttManager(
+            api,
+            "",             # hub 级连接不属于单一设备; 凭据是账号级的
+            "",
+            cloud_ctrl=self._cloud_ctrl,
+            on_event=self._on_event,
+            certs_dir=certs_dir,
+        )
+        self._handlers: dict[str, Callable[[dict], Awaitable[None]]] = {}
+
+    # ----------------------------------------------------------- 注册/注销
+    def register(self, device_id: str, handler: Callable[[dict], Awaitable[None]]) -> None:
+        """注册设备归属(coordinator 重载会覆盖旧 handler)."""
+        if device_id:
+            self._handlers[device_id] = handler
+
+    def unregister(self, device_id: str) -> None:
+        self._handlers.pop(device_id, None)
+
+    @property
+    def has_handlers(self) -> bool:
+        return bool(self._handlers)
+
+    @property
+    def connected(self) -> bool:
+        return self._manager.connected
+
+    # ----------------------------------------------------------- 生命周期
+    async def start_for(self, device_id: str, handler: Callable[[dict], Awaitable[None]]) -> None:
+        self.register(device_id, handler)
+        await self._manager.async_start()
+
+    async def stop_for(self, device_id: str) -> None:
+        self.unregister(device_id)
+        if not self._handlers:
+            await self._manager.async_stop()
+
+    async def request(self, api: str, params: dict, timeout: float = 10.0) -> dict:
+        """控制请求(与其它条目共用一条连接; seq 匹配各自响应)."""
+        return await self._manager.async_request(api, params, timeout=timeout)
+
+    # ------------------------------------------------------------- 分发
+    async def _cloud_ctrl(self, api: str, params: dict) -> dict:
+        return await self._manager.api.async_post(api, params)
+
+    async def _on_event(self, data: dict) -> None:
+        topic = data.get("topic") or ""
+        msg = data.get("msg") or {}
+        if topic == "iot_response":
+            # 未按 seq 匹配上的响应 = 异条目请求的响应/超时迟到残响。
+            # 合并它会把他条目(或手机 App)设备的属性写进本条目 → 串扰。
+            _LOGGER.debug("MQTT iot_response dropped (no pending seq match)")
+            return
+        device_id = extract_device_id(msg)
+        if not device_id:
+            _LOGGER.debug(
+                "MQTT push without deviceId dropped: topic=%s keys=%s",
+                topic, list(msg)[:6] if isinstance(msg, dict) else type(msg).__name__,
+            )
+            return
+        handler = self._handlers.get(device_id)
+        if handler is None:
+            # 同账号其它设备的推送(包括未接入 HA 的设备) → 无人认领, 丢弃
+            _LOGGER.debug(
+                "MQTT push for %s… has no registered entry (topic=%s)",
+                device_id[:6], topic,
+            )
+            return
+        try:
+            await handler({"topic": topic, "msg": msg})
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("MQTT event dispatch failed for %s…", device_id[:6])

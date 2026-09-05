@@ -25,12 +25,16 @@ from .const import (
     CONF_SNAPSHOT_OSD,
     CONF_SNAPSHOT_OSD_ALPHA,
     CONF_SNAPSHOT_STREAM_ID,
+    CONF_STREAM_PREVIEW_OSD,
+    CONF_STREAM_PREVIEW_SECONDS,
     DEFAULT_SNAPSHOT_CHANNELS,
     DEFAULT_SNAPSHOT_LAYOUT,
     DEFAULT_SNAPSHOT_MIN_INTERVAL,
     DEFAULT_SNAPSHOT_OSD,
     DEFAULT_SNAPSHOT_OSD_ALPHA,
     DEFAULT_SNAPSHOT_STREAM_ID,
+    DEFAULT_STREAM_PREVIEW_OSD,
+    DEFAULT_STREAM_PREVIEW_SECONDS,
     LAYOUT_HSTACK,
     LAYOUT_SINGLE,
     LAYOUT_VSTACK,
@@ -103,12 +107,19 @@ class MediaManager:
             self._snapshot_lock = asyncio.Lock()
         return self._snapshot_lock
 
-    # ---- 凭据(options 覆盖 entry.data;设备密码留空回退安全码) --------------
+    # ---- 凭据(options 显式覆盖 entry.data;设备密码留空回退安全码) ---------
     def _cred(self, key: str) -> str:
+        """读取凭据: options **显式设置**(含空串=用户清空)优先于 data.
+
+        ★ 不能用 `opts.get(key) or data.get(key)` —— 空串 falsy 会让
+          "清空"操作被 data 旧值顶回(永远清不掉)。
+        """
         entry = self.coordinator.entry
         opts = entry.options or {}
         data = entry.data or {}
-        return str(opts.get(key) or data.get(key) or "").strip()
+        if key in opts:
+            return str(opts.get(key) or "").strip()
+        return str(data.get(key) or "").strip()
 
     @property
     def security_code(self) -> str:

@@ -28,12 +28,26 @@
         "description": "点击链接打开滑块验证页: {url_link}\n\n完成滑块后回到这里点击提交, 短信验证码将自动发送。\n\n(链接打不开时, 在 HA 所在主机地址后拼接相对路径访问: {url})",
         "data": {}
       },
+      "credit": {
+        "title": "终端授权验证",
+        "description": "账号 {username} 开启了「终端管理」, 新设备首次登录需要授权。验证码已发送到你的手机, 输入 6 位短信验证码完成本终端授权。\n\n(授权后本终端即可正常登录; 若收不到短信, 请重试或检查 App 内的终端管理设置。)",
+        "data": {
+          "valid_code": "短信验证码(6 位)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "重新认证乐橙账号",
+        "description": "账号 {username} 的登录被乐橙「终端管理」拦截(终端授权变动)。请重新输入密码, 完成一次终端授权后集成将无缝恢复。\n\n(实体、历史记录与配置全部保留, 不会重新添加设备。)",
+        "data": {
+          "password": "密码"
+        }
+      },
       "device": {
         "title": "选择设备",
-        "description": "请选择要添加的门锁设备, 并输入设备密码体系凭据。\n\n**安全码**: 机身标签(背面/电池仓)二维码+条码旁的 8 位大写字母数字串, 也可能在 App「设备设置→关于设备」或包装盒上。\n\n**设备密码**: 在乐橙 App「修改设备密码」后的当前值; 未修改过则与安全码相同, **留空即可**。\n\n凭据用于: 告警抓拍图解密(安全码)与云端实时预览帧解密(设备密码), 仅保存在本地配置。",
+        "description": "请选择要添加的门锁设备。\n\n**安全码**(选填): 机身标签(背面/电池仓)二维码+条码旁的 8 位大写字母数字串, 也可能在 App「设备设置→关于设备」或包装盒上。仅告警截图解密需要, **可留空后补**。\n\n**设备密码**(选填): 在乐橙 App「修改设备密码」后的当前值; 未修改过则与安全码相同, **留空即可**。\n\n两项凭据仅保存在本地, 之后可随时在「设置 → 设备与服务 → LeChange Door Lock → ⚙ 配置」中补填或修改。",
         "data": {
           "device_id": "设备",
-          "security_code": "安全码(机身标签 8 位)",
+          "security_code": "安全码(机身标签 8 位, 选填)",
           "device_password": "设备密码(改过才填, 留空=同安全码)"
         }
       }
@@ -45,39 +59,60 @@
       "no_devices": "该账号下未找到设备。",
       "network": "网络错误,请稍后重试。",
       "unknown": "未知错误。",
-      "security_code_invalid": "安全码格式应为 8 位大写字母+数字(见机身标签)。"
+      "security_code_invalid": "安全码格式应为 8 位大写字母+数字(见机身标签)。",
+      "credit_failed": "终端授权验证失败, 请确认验证码后重试。"
     },
     "abort": {
       "already_configured": "设备已经配置。",
       "device_not_found": "未找到所选设备。",
       "gt4_unavailable": "GT4 滑块服务不可用, 请重启 Home Assistant 后重试。",
       "gt4_timeout": "GT4 滑块超时(5 分钟内未收到有效四元组)。",
-      "gt4_failed": "GT4 验证失败, 请查看日志后重试。"
+      "gt4_failed": "GT4 验证失败, 请查看日志后重试。",
+      "credit_unavailable": "终端授权服务不可用: 客户端凭据(OEM AK/SK)加载失败, 请更新集成或检查环境变量 LECHANGE_OEM_AK/LECHANGE_OEM_SK。",
+      "credit_send_failed": "授权验证码发送失败, 请稍后重试。",
+      "reauth_successful": "重新认证成功, 集成已恢复。",
+      "reauth_failed": "重新认证失败: 未找到对应的集成配置, 请删除后重新添加。"
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "媒体与连接选项",
-        "description": "门外截图为云端取流抽帧(默认主码流, 双摄自动横向组合)。\n门外截图与实时预览 OSD 默认开启(时间戳左上+通道名右下), 可关闭。取流请求会唤醒电池设备, 节流间隔 ≥60s。",
+        "title": "集成配置",
+        "description": "凭据、门外截图与连接方式。所有项均可后补/修改, 保存后立即生效。",
         "data": {
-          "security_code": "安全码(留空=保持原值)",
-          "device_password": "设备密码(留空=保持原值/同安全码)",
-          "snapshot_min_interval": "门外截图最小间隔(秒, ≥15)",
-          "rtsp_url": "完整 RTSP/中转 URL(可选)",
-          "rtsp_host": "局域网 IP(留空=纯云端)",
+          "security_code": "安全码",
+          "device_password": "设备密码",          "snapshot_min_interval": "门外截图最小间隔(秒)",
+          "snapshot_stream_id": "云端取流码流",
+          "snapshot_osd": "门外截图叠加水印",
+          "snapshot_osd_alpha": "水印底色不透明度",
+          "camera_auto_image": "摄像头自动取图",
+          "channel_hosts": "本地通道直连地址",
+          "stream_preview_osd": "实时预览叠加水印",
+          "stream_preview_seconds": "实时预览录制时长(秒)",
+          "rtsp_url": "RTSP 完整地址(可选覆盖)",
+          "rtsp_host": "局域网 IP(可选)",
           "rtsp_port": "RTSP 端口",
           "rtsp_username": "RTSP 用户名",
           "rtsp_password": "RTSP 密码",
-          "rtsp_subtype": "码流(0 主码流 / 1 子码流)",
-          "snapshot_stream_id": "码流(默认主码流)",
-          "snapshot_osd": "门外截图 OSD(默认开, 时间戳+通道名)",
-          "snapshot_osd_alpha": "OSD 底色不透明度(0-255, 160≈63% 半透明)",
-          "snapshot_layout": "多通道布局(左右/上下/单摄)",
-          "snapshot_channel": "单摄布局通道选择",
-          "channel_hosts": "本地通道地址(每行 通道号=IP[:端口]; 设备在局域网时优先, 留空=云端)",
-          "stream_preview_osd": "实时预览 OSD(默认开, 可关=不带叠加)",
-          "stream_preview_seconds": "实时预览时长(秒, 3-60)"
+          "rtsp_subtype": "RTSP 码流"
+        },
+        "data_description": {
+          "security_code": "安全码",
+          "device_password": "原始设备密码为机器的安全码。如果没有修改直接填入设备密码框即可。在 App「修改设备密码」后请填入当前值。用于实时流帧解密(截图/预览); 留空 = 保持原值。",
+          "snapshot_min_interval": "两次云端门外截图的最小间隔(15-3600 秒, 默认 60)。取流会唤醒电池门锁, 调小会更费电; 仅影响摄像头实体轮询, 手动服务调用不受限。",
+          "snapshot_stream_id": "主码流(推荐): 清晰且实测中继有数据; 子码流: 省带宽但实测中继无数据, 会自动回退主码流。",
+          "snapshot_osd": "在截图上烧录时间戳(左上)与通道名(右下)。关闭后输出原始干净画面。",
+          "snapshot_osd_alpha": "水印底色黑度 0-255(默认 160≈63% 半透明)。0=全透明(只看到文字), 255=纯黑底。",
+          "camera_auto_image": "总开关, 默认关: 关闭后摄像头实体不自动取图 —— 云端取流会唤醒电池锁, 局域网抓拍同样让设备保持活跃, 都耗电。关闭 = 摄像头卡片零自动唤醒(显示上次缓存帧); 「获取门外截图」按钮与截图服务仍可手动使用。开启 = 仪表盘摄像头卡片按节流间隔自动刷新(耗电)。",
+          "channel_hosts": "本地直通地址, 每行一条「通道号=IP[:端口]」。示例 — 单摄/仅主摄直连: 0=192.168.1.10:80 ; 双摄两路都直连: 0=192.168.1.10:80 和 1=192.168.1.10:80 (端口=设备 HTTP 端口, 大华默认 80, 可省略)。设备在局域网内时截图/预览优先直连(不走云端, 更快更省电); 留空 = 全走云端, 设备不在网时自动回退云端。",
+          "stream_preview_osd": "实时预览/录制视频是否烧录时间戳与通道名(默认开)。",
+          "stream_preview_seconds": "实时预览单次采集时长 3-60 秒(默认 10)。采集期间设备保持唤醒。",
+          "rtsp_url": "完整 RTSP 地址模板, '{'channel'}' 会自动替换为通道号(0=主摄, 1=辅摄)。示例 — go2rtc/ffmpeg 中转: rtsp://192.168.1.5:8554/doorlock (不带占位符时双摄共用该地址) ; 大华原生流: rtsp://admin:你的密码@192.168.1.10:554/cam/realmonitor?channel='{'channel'}'&subtype=0 (替换结果为 0/1; 设备通道号从 1 计数时双摄请用 go2rtc 分别建流)。填写后摄像头实体把地址交给 HA stream 组件, 跳过云端取流; 留空 = 云端模式。",
+          "rtsp_host": "门锁的局域网 IP(配合下方凭据用于 CGI 抓拍)。留空 = 纯云端模式(推荐, 无需设备开启 RTSP)。",
+          "rtsp_port": "RTSP 端口, 默认 554。",
+          "rtsp_username": "设备 RTSP/CGI 用户名, 默认 admin。",
+          "rtsp_password": "设备 RTSP/CGI 密码(与乐橙 App 账号无关, 是设备本身凭据)。",
+          "rtsp_subtype": "0=主码流(高清, 默认), 1=子码流(流畅)。仅影响 RTSP/CGI 直连路径。"
         }
       }
     }
@@ -98,8 +133,8 @@
       "door_state": {
         "name": "门状态",
         "state": {
-          "closed": "关",
-          "open": "开",
+          "closed": "门已锁",
+          "open": "门未锁",
           "unknown": "未知"
         }
       },
@@ -182,7 +217,35 @@
     },
     "select": {
       "snapkey_weekday_mode": {
-        "name": "临时密码生效星期"
+        "name": "临时密码生效星期",
+        "state": {
+          "Every day": "每天",
+          "Weekdays": "工作日",
+          "Weekend": "周末",
+          "Monday": "周一",
+          "Tuesday": "周二",
+          "Wednesday": "周三",
+          "Thursday": "周四",
+          "Friday": "周五",
+          "Saturday": "周六",
+          "Sunday": "周日"
+        }
+      },
+      "snapshot_channels": {
+        "name": "截图通道选择",
+        "state": {
+          "0+1": "双摄组合(通道0+1)",
+          "0": "仅通道0(猫眼主摄)",
+          "1": "仅通道1(辅摄)"
+        }
+      },
+      "snapshot_layout": {
+        "name": "双摄截图布局",
+        "state": {
+          "hstack": "左右组合(双通道并列)",
+          "vstack": "上下组合(双通道纵排)",
+          "single": "单摄单图"
+        }
       }
     },
     "text": {

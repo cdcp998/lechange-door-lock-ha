@@ -31,10 +31,11 @@ from lechange_door_lock.const import (
 # const / key derivation
 # ---------------------------------------------------------------------------
 def test_oem_keys_env_provided():
-    """OEM AK/SK 通过环境变量提供, 不随源码分发; 缺省为空(功能降级)."""
+    """OEM AK/SK: 缺省值随发布内置(乐橙客户端内置公开凭据), 环境变量可覆盖."""
     import lechange_door_lock.const as _const
     assert isinstance(_const.OEM_AK, str)
     assert isinstance(_const.OEM_SK, str)
+    assert _const.OEM_AK and _const.OEM_SK  # 内置缺省值, 授权链开箱即用
 
 
 def test_gt4_identity_is_default_prefix_not_password():

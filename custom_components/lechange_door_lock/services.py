@@ -16,6 +16,8 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
 from .const import (
+    CONF_DEVICE_PASSWORD,
+    CONF_SECURITY_CODE,
     DOMAIN,
     EVENT_PREFIX,
     SERVICE_CALL_ANSWER,
@@ -25,12 +27,15 @@ from .const import (
     SERVICE_DOORFRONT_SNAPSHOT,
     SERVICE_ALARM_IMAGE,
     SERVICE_RECORD_PREVIEW,
+    SERVICE_DUMP_DIAGNOSTICS,
+    SERVICE_SET_CREDENTIALS,
     SERVICE_GENERATE_SNAPKEY,
     SERVICE_DELETE_SNAPKEY,
     SERVICE_GET_OPEN_DOOR_RECORD,
     SERVICE_GET_SNAPKEY_LIST,
     SERVICE_GET_VOICE_REPLY,
     SERVICE_OPEN_DOOR_REMOTE,
+    SERVICE_RELOAD_DATA,
     SERVICE_SEND_SMS_CODE,
     SERVICE_AUTHORIZE_TERMINAL,
     SERVICE_SET_PROPERTIES,
@@ -42,6 +47,15 @@ from .coordinator import LeChangeDataUpdateCoordinator
 _LOGGER = logging.getLogger(__name__)
 
 DEVICE_ID_SCHEMA = vol.Schema({vol.Required("device_id"): cv.string})
+SET_CREDENTIALS_SCHEMA = vol.Schema({
+    vol.Required("device_id"): cv.string,
+    vol.Optional(CONF_SECURITY_CODE): cv.string,
+    vol.Optional(CONF_DEVICE_PASSWORD): cv.string,
+})
+RELOAD_DATA_SCHEMA = vol.Schema({
+    vol.Required("device_id"): cv.string,
+    vol.Optional("wake", default=False): cv.boolean,
+})
 
 CALL_SCHEMA = vol.Schema(
     {
@@ -229,6 +243,146 @@ async def async_wake_up_device(call: ServiceCall):
     _fire_event(hass, "wake_up", device_id, errors=errors)
 
 
+async def async_reload_data(call: ServiceCall):
+    """强制重载设备全部数据(持久化会话, 无需重新登录).
+
+    全量拉取: 设备快照 + IoT 属性 + 云侧告警 + 型号/固件标定更新到
+    设备注册表。会话失效时 EVERGREEN 自主续期链自动补会话。
+    wake=True: 先尝试唤醒(休眠设备 GetProperties 10003 时数据拉不全,
+    唤醒窗口内属性才有实时值)。
+    """
+    hass, device_id = call.hass, call.data["device_id"]
+    coordinator = _get_coordinator(hass, device_id)
+    if not coordinator:
+        raise HomeAssistantError(f"Device {device_id} not found")
+    wake = bool(call.data.get("wake", False))
+    if wake:
+        for prop in ("Dormant", "sleepStatus"):
+            try:
+                await coordinator.api.async_set_properties(
+                    coordinator.device_id, coordinator.product_id, {prop: False}
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Wake (%s) before reload failed: %s", prop, err)
+        import asyncio as _aio
+
+        await _aio.sleep(8)   # 唤醒窗口(取流唤醒 ~5s 上线)
+    try:
+        await coordinator.async_refresh()          # 全量: 快照+属性+告警
+        await coordinator.async_update_device_info()  # 型号/固件/名称 → 注册表
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.exception("Reload data failed for %s", device_id)
+        raise HomeAssistantError(f"重载数据失败: {err}") from err
+    _fire_event(hass, "reload_data", device_id, ok=True)
+
+
+async def async_set_credentials(call: ServiceCall):
+    """显式设置/清空安全码与设备密码(验证/排障专用, 即时生效).
+
+    参数语义(与表单"留空=保持"互补):
+    · 不传该键 → 不修改;
+    · 传空串("") → 显式清空(options 写空串, media._cred 空串生效);
+    · 传值 → 设置。
+    ★ 设备密码清空后流帧解密回退安全码 —— 仅在"从未改过设备密码"
+      时等价; 改过的锁清空即解密失败(截图/预览损坏), 验证完请填回。
+    """
+    hass, device_id = call.hass, call.data["device_id"]
+    coordinator = _get_coordinator(hass, device_id)
+    if not coordinator:
+        raise HomeAssistantError(f"Device {device_id} not found")
+    entry = coordinator.entry
+    updates: dict = {}
+    applied: dict = {}
+    for key in (CONF_SECURITY_CODE, CONF_DEVICE_PASSWORD):
+        if key in call.data:
+            val = str(call.data[key] or "").strip()
+            updates[key] = val
+            applied[key] = val if val else "(cleared)"
+    if updates:
+        hass.config_entries.async_update_entry(
+            entry, options={**(entry.options or {}), **updates}
+        )
+    _fire_event(hass, "set_credentials", device_id, applied=applied)
+    _LOGGER.info(
+        "Credentials updated for %s via service: %s", device_id, applied or "none"
+    )
+
+
+async def async_dump_diagnostics(call: ServiceCall):
+    """诊断转储: 各数据源的原始响应与解码结果一次性拉平 → 事件.
+
+    用于排查"某属性永远未知"类问题 —— 转储里能看到:
+    ① GetProperties(带列表) 实际返回了哪些键/值; ② V2 单设备快照
+    propertiesMap 原文; ③ 设备列表快照 propertiesMap 原文; ④ 解码后
+    的 identifier 清单(型号表未覆盖的 ref 一目了然)。
+    """
+    import json as _json
+
+    hass, device_id = call.hass, call.data["device_id"]
+    coordinator = _get_coordinator(hass, device_id)
+    if not coordinator:
+        raise HomeAssistantError(f"Device {device_id} not found")
+    api = coordinator.api
+    dump: dict = {"device_id": device_id}
+
+    # ① GetProperties(带显式列表) — 原始 ref 键 + 解码后
+    try:
+        model = await api.async_get_model(coordinator.device_id, coordinator.product_id)
+        raw = await api.async_post("iot.control.GetProperties", {
+            "deviceId": coordinator.device_id,
+            "productId": coordinator.product_id,
+            "channelId": coordinator.channel_id,
+            "properties": list(api.CORE_PROPERTY_IDENTIFIERS),
+            "timeout": 15000,
+            "qos": 1,
+        }, timeout=20.0)
+        dump["get_properties_raw"] = raw
+        dump["get_properties_decoded"] = model.decode_properties(
+            raw.get("properties") or raw or {}
+        )
+    except Exception as err:  # noqa: BLE001
+        dump["get_properties_error"] = str(err)
+
+    # ② V2 单设备快照 propertiesMap 原文
+    try:
+        info = await api.async_get_device_info(
+            coordinator.device_id, coordinator.product_id
+        )
+        dump["basic_info_v2_status"] = info.get("status")
+        pm = info.get("properties_map") or ""
+        dump["basic_info_v2_properties_map"] = (
+            _json.loads(pm) if isinstance(pm, str) and pm[:1] == "{" else pm
+        )
+        if pm:
+            dump["basic_info_v2_decoded"] = await coordinator._decode_properties_map(pm)
+    except Exception as err:  # noqa: BLE001
+        dump["basic_info_v2_error"] = str(err)
+
+    # ③ 设备列表快照(本设备条目) propertiesMap 原文
+    try:
+        for dev in await api.async_get_devices():
+            if dev.get("deviceId") == coordinator.device_id:
+                pm = dev.get("properties_map") or ""
+                dump["device_list_properties_map"] = (
+                    _json.loads(pm) if isinstance(pm, str) and pm[:1] == "{" else pm
+                )
+                break
+    except Exception as err:  # noqa: BLE001
+        dump["device_list_error"] = str(err)
+
+    # ④ coordinator 当前内存数据(props/派生字段/继承状态)
+    data = coordinator.data or {}
+    dump["coordinator_props"] = data.get("props")
+    dump["coordinator_derived"] = {
+        k: data.get(k) for k in (
+            "props_ok", "door_lock_status", "battery_lock", "battery_camera",
+            "wifi", "sleeping", "online", "last_error",
+        )
+    }
+    _fire_event(hass, "diagnostics", device_id, dump=dump)
+    _LOGGER.info("Diagnostics dump for %s fired via event (see lechange_door_lock_event)", device_id)
+
+
 async def async_call_answer(call: ServiceCall):
     """对话: 应答门铃呼叫 (CallAnswer)."""
     hass, device_id = call.hass, call.data["device_id"]
@@ -329,7 +483,11 @@ async def async_create_snapkey(call: ServiceCall):
 
 
 async def async_get_snapkey_list(call: ServiceCall):
-    """获取临时密码分组列表 (iot.message.SmartLockSecretListV2, 设备休眠可用)."""
+    """获取临时密码列表 (iot.message.SmartLockSecretListV2, 设备休眠可用).
+
+    ★ 响应里 secretGroups[] 是 80 个用户分组槽位(固定),
+      secrets[] 才是真正的临时密码(含 tempKey/state 0 待下发/1 已生效)。
+    """
     hass, device_id = call.hass, call.data["device_id"]
     coordinator = _get_coordinator(hass, device_id)
     if not coordinator:
@@ -338,7 +496,7 @@ async def async_get_snapkey_list(call: ServiceCall):
         coordinator.device_id, coordinator.product_id, types=3
     )
     if isinstance(result, dict):
-        coordinator.set_snapkey_list(result.get("secretGroups") or [])
+        coordinator.set_snapkey_list(result.get("secrets") or [])
     _fire_event(hass, "snapkey_list", device_id, result=result)
     await coordinator.async_request_refresh()
 
@@ -454,20 +612,34 @@ def _save_www(
     data: bytes,
     *,
     image: bool = False,
+    device_id: str = "",
 ) -> str | None:
-    """保存文件到 <config>/www/lechange_door_lock/, 返回 /local/ URL;失败返回 None。"""
+    """保存文件到 <config>/www/lechange_door_lock/<device_id>/, 返回 /local/ URL.
+
+    ★ 按条目设备分子目录: 多设备(多条目)共用同一 www 目录时, 相同文件名
+      (如 preview_h264)会互相覆盖 —— 设备间文件互不串扰。
+    """
     safe = os.path.basename(filename.strip().replace("\\", "/")) or ""
     if not safe:
         return None
     if image and not safe.lower().endswith(".jpg"):
         safe += ".jpg"
-    www_dir = hass.config.path("www", "lechange_door_lock")
+    device_dir = str(device_id or "").strip()
+    if device_dir:
+        # device_id 是设备 SN(字母数字); 仍按 basename 防路径逃逸
+        device_dir = os.path.basename(device_dir)
+    if device_dir:
+        www_dir = hass.config.path("www", "lechange_door_lock", device_dir)
+        rel = f"lechange_door_lock/{device_dir}/{safe}"
+    else:
+        www_dir = hass.config.path("www", "lechange_door_lock")
+        rel = f"lechange_door_lock/{safe}"
     try:
         os.makedirs(www_dir, exist_ok=True)
         path = os.path.join(www_dir, safe)
         with open(path, "wb") as f:
             f.write(data)
-        return f"/local/lechange_door_lock/{safe}"
+        return f"/local/{rel}"
     except OSError as err:
         _LOGGER.warning("保存文件到 www 失败: %s", err)
         return None
@@ -508,7 +680,7 @@ async def async_doorfront_snapshot(call: ServiceCall):
     url = None
     if call.data.get("filename"):
         url = await hass.async_add_executor_job(
-            _save_www, hass, call.data["filename"], jpeg, image=True
+            _save_www, hass, call.data["filename"], jpeg, image=True, device_id=device_id
         )
     _fire_event(
         hass,
@@ -539,7 +711,7 @@ async def async_record_preview_service(call: ServiceCall):
     ext = "h265" if codec == "h265" else "h264"
     filename = call.data.get("filename") or f"preview_{ext}"
     url = await hass.async_add_executor_job(
-        _save_www, hass, filename, video
+        _save_www, hass, filename, video, device_id=device_id
     )
     _fire_event(
         hass,
@@ -595,7 +767,8 @@ async def async_alarm_image(call: ServiceCall):
     url = None
     if call.data.get("filename"):
         url = await hass.async_add_executor_job(
-            _save_www, hass, call.data["filename"] or f"alarm_{alarm.get('alarmId')}", jpeg, image=True
+            _save_www, hass, call.data["filename"] or f"alarm_{alarm.get('alarmId')}",
+            jpeg, image=True, device_id=device_id,
         )
     _fire_event(
         hass,
@@ -618,6 +791,15 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, SERVICE_WAKE_UP_DEVICE, async_wake_up_device, schema=DEVICE_ID_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_RELOAD_DATA, async_reload_data, schema=RELOAD_DATA_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_DUMP_DIAGNOSTICS, async_dump_diagnostics, schema=DEVICE_ID_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_SET_CREDENTIALS, async_set_credentials, schema=SET_CREDENTIALS_SCHEMA
     )
     hass.services.async_register(
         DOMAIN, SERVICE_CALL_ANSWER, async_call_answer, schema=CALL_SCHEMA

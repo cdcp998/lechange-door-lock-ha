@@ -13,7 +13,12 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_DEVICE_ID, DOMAIN, PROP_LOCK_STATE
 from .entity import LeChangeEntity
-from .state_utils import derive_door_state, format_open_door_time, open_method_label
+from .state_utils import (
+    derive_door_state,
+    derive_lock_state,
+    format_open_door_time,
+    open_method_label,
+)
 
 DOOR_STATE_OPTIONS = ["closed", "open", "unknown"]
 POWER_MODE_OPTIONS = ["0", "1", "2", "unknown"]
@@ -75,11 +80,26 @@ class LeChangeDoorStateSensor(_BaseLeChangeSensor):
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = DOOR_STATE_OPTIONS
 
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "door_state")
+
     @property
     def native_value(self) -> str | None:
         data = self.coordinator.data
         if not data:
             return None
+        # ★ 门状态 = 门锁状态(与原 lock 实体同一条判定链):
+        # doorLockStatus(0 锁定/1 未锁/2 未知) → lockState(beClosed/beOpened/beAjar)
+        # → doorLockState(0 关/1 开)。doorLockStatus 表达"是否锁定",
+        # lockState 表达"锁舌状态", 取先可得者。
+        locked = derive_lock_state(
+            data.get("door_lock_status"),
+            (data.get("props") or {}).get("doorLockState"),
+            data.get("lock_state", ""),
+        )
+        if locked is not None:
+            return "closed" if locked else "open"
+        # 全链不可得 → 回退旧逻辑(doorLockState/lockState 文本)
         state = (data.get("props") or {}).get(PROP_LOCK_STATE)
         return derive_door_state(state, data.get("lock_state", ""))
 
@@ -89,6 +109,9 @@ class LeChangePowerModeSensor(_BaseLeChangeSensor):
 
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = POWER_MODE_OPTIONS
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "power_mode")
 
     @property
     def native_value(self) -> str | None:
@@ -106,6 +129,9 @@ class LeChangeWifiSignalSensor(_BaseLeChangeSensor):
 
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = WIFI_SIGNAL_OPTIONS
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "wifi_signal")
 
     @property
     def native_value(self) -> str | None:
@@ -132,13 +158,19 @@ class LeChangeLastOpenSensor(_BaseLeChangeSensor):
 
     _attr_icon = "mdi:door-open"
 
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "last_open")
+
     @property
     def native_value(self) -> str | None:
         record = self._latest_record()
         if not record:
             return None
-        name = record.get("name") or ""
-        method = open_method_label(record.get("keyType"))
+        # 归一化形状(user/method) + 原始形状(name/keyType) 双兼容
+        name = record.get("user") or record.get("name") or ""
+        method = record.get("method") or open_method_label(
+            record.get("keyType")
+        )
         parts = [p for p in (name, method) if p]
         return " · ".join(parts) if parts else None
 
@@ -168,7 +200,6 @@ class LeChangeLatestOpenDoorTimeSensor(_BaseLeChangeSensor):
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "latest_open_door_time")
-
     @property
     def native_value(self) -> str | None:
         data = self.coordinator.data
@@ -177,7 +208,8 @@ class LeChangeLatestOpenDoorTimeSensor(_BaseLeChangeSensor):
         record = data.get("latest_open_door_record")
         if not isinstance(record, dict):
             return None
-        for key in ("localTime", "time", "openTime", "occurTime", "recordTime"):
+        for key in ("time", "localTime", "openTime", "open_time",
+                    "recordTime", "unlockTime", "occurTime"):
             value = record.get(key)
             if value:
                 return format_open_door_time(value)
@@ -191,7 +223,6 @@ class LeChangeLatestOpenDoorMethodSensor(_BaseLeChangeSensor):
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "latest_open_door_method")
-
     @property
     def native_value(self) -> str | None:
         data = self.coordinator.data
@@ -200,6 +231,9 @@ class LeChangeLatestOpenDoorMethodSensor(_BaseLeChangeSensor):
         record = data.get("latest_open_door_record")
         if not isinstance(record, dict):
             return None
+        method = record.get("method")
+        if method:
+            return str(method)
         key_type = record.get("keyType")
         if key_type is None:
             return None
@@ -213,7 +247,6 @@ class LeChangeSnapkeyCountSensor(_BaseLeChangeSensor):
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "snapkey_count")
-
     @property
     def native_value(self) -> int | None:
         return len(self.coordinator.snapkey_list)
@@ -233,7 +266,6 @@ class LeChangeLatestAlarmSensor(_BaseLeChangeSensor):
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "latest_alarm")
-
     @property
     def native_value(self) -> str | None:
         data = self.coordinator.data

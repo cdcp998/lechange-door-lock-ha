@@ -30,7 +30,6 @@ async def async_setup_entry(
     device_id = entry.data[CONF_DEVICE_ID]
     entities = [
         LeChangeChildLockSwitch(coordinator, device_id),
-        LeChangeCallTransferSwitch(coordinator, device_id),
     ]
     async_add_entities(entities)
 
@@ -83,14 +82,3 @@ class LeChangeChildLockSwitch(_BaseLeChangeSwitch):
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "child_lock", PROP_CHILD_LOCK)
-
-
-class LeChangeCallTransferSwitch(_BaseLeChangeSwitch):
-    """门铃呼叫转接开关 (sdl_callTransferSwitch, 枚举 0/1)."""
-
-    def __init__(self, coordinator, device_id: str) -> None:
-        super().__init__(
-            coordinator, device_id, "call_transfer", PROP_CALL_TRANSFER
-        )
-
-

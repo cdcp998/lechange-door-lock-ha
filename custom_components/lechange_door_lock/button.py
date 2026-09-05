@@ -80,18 +80,25 @@ class LeChangeSnapshotDoorButton(_BaseLeChangeButton):
 
     async def async_press(self) -> None:
         coordinator = self.coordinator
+        # 局域网 CGI(如配置) → 云端 RTSV1 兜底(节流; force=按钮语义即时抓拍)
         image = await LeChangeCameraEntity.capture_image_via_options(coordinator, "0")
         if not image:
+            image = await coordinator.media.async_cloud_snapshot()
+        if not image:
             raise HomeAssistantError(
-                "获取门外截图失败:请确认集成选项已配置局域网 rtsp_host(及 RTSP 凭据)且设备在线"
+                "获取门外截图失败:云端采流与局域网抓拍均不可用 — "
+                "请确认设备在线(休眠设备会被自动唤醒, 可稍后重试);"
+                "或在集成选项中配置局域网 rtsp_host 及 RTSP 凭据"
             )
 
         def _write() -> str:
-            www = Path(coordinator.hass.config.path("www"))
-            (www / "lechange_door_lock").mkdir(parents=True, exist_ok=True)
+            # ★ 按条目设备分子目录(与 services._save_www 同规则):
+            #   多设备(多条目)时文件互不覆盖, 一目了然归属哪台锁
+            www = Path(coordinator.hass.config.path("www", "lechange_door_lock", self._device_id))
+            www.mkdir(parents=True, exist_ok=True)
             filename = f"lechange_{self._device_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-            (www / "lechange_door_lock" / filename).write_bytes(image)
-            return f"/local/lechange_door_lock/{filename}"
+            (www / filename).write_bytes(image)
+            return f"/local/lechange_door_lock/{self._device_id}/{filename}"
 
         url = await coordinator.hass.async_add_executor_job(_write)
         # 记录最近一次快照地址
@@ -153,7 +160,8 @@ class LeChangeRefreshSnapkeyListButton(_BaseLeChangeButton):
         result = await coordinator.api.async_smart_lock_secret_list(
             coordinator.device_id, coordinator.product_id, types=3
         )
-        groups = result.get("secretGroups") if isinstance(result, dict) else None
+        # ★ secrets[] 才是临时密码(secretGroups[] 是 80 个固定分组槽位)
+        groups = result.get("secrets") if isinstance(result, dict) else None
         if groups is None:
             raise HomeAssistantError("Get temporary password list failed")
         coordinator.set_snapkey_list(groups)

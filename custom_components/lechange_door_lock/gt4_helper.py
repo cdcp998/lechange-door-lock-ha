@@ -37,6 +37,7 @@ from typing import Any, Callable, Optional
 from aiohttp import web
 
 from .const import (
+    DOMAIN,
     GT4_CAPTCHA_ID,
     GT4_LISTEN_PATH,
     GT4_LISTEN_PORT,
@@ -376,6 +377,33 @@ def build_ha_views(listener: "GT4TupleListener", html_route: str = "/api/lechang
             return await listener.handle_tuple_request(request)
 
     return [GT4SlidesView(), GT4TupleView()]
+
+
+def ensure_gt4_views_registered(hass) -> None:
+    """幂等注册 GT4 滑块视图到 hass.http(可重复调用, 重复调用零副作用).
+
+    新版 HA 的既定行为: 纯 config-flow 集成在第一个配置项创建成功之前
+    不调用 async_setup —— 而"添加设备"流程内就需要这些视图
+    (GT4 滑块 / _after_login 的回调清理)。配置流程入口先调用本函数,
+    保证 hass.data[DOMAIN] 与视图在流程内可用。
+    """
+    if hass.data.get(DOMAIN, {}).get("gt4_listener") is not None:
+        return
+    hass.data.setdefault(DOMAIN, {})
+
+    # GT4 本地滑块: 注册 HA 原生 view(挂在 HA 自身 HTTP 端口, 容器零配置).
+    # 页面: GET /api/lechange/gt4/slides?token=... (config_flow 生成时缓存)
+    # 回传: POST /api/lechange/gt4/tuple (requires_auth=False, 一次性 token 校验)
+    listener = GT4TupleListener()  # 回调由 config_flow 按 token 注入
+    try:
+        for view in build_ha_views(listener):
+            hass.http.register_view(view)
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.error("Registering GT4 slider views failed: %s", err)
+        return
+    # 先注册成功再占位(同步代码, 事件循环内无并发窗口)
+    hass.data[DOMAIN]["gt4_listener"] = listener
+    _LOGGER.info("LeChange GT4 slider view registered on HA http port")
 
 
 def parse_verify_token(captcha_data: dict) -> str:

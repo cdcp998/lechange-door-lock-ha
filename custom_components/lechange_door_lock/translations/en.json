@@ -28,12 +28,26 @@
         "description": "Open the slider page via this link: {url_link}\n\nComplete the slider, then come back here and click Submit. The SMS code will be sent automatically.\n\n(If the link doesn't work, append the relative path to your Home Assistant host: {url})",
         "data": {}
       },
+      "credit": {
+        "title": "Terminal authorization",
+        "description": "Account {username} has \"terminal management\" enabled; a new device must be authorized on first login. A verification code has been sent to your phone — enter the 6-digit SMS code to authorize this terminal.\n\n(After authorization this terminal can log in normally. If no SMS arrives, retry or check the terminal-management settings in the app.)",
+        "data": {
+          "valid_code": "SMS code (6 digits)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate LeChange account",
+        "description": "Logins for account {username} are blocked by LeChange \"terminal management\" (terminal authorization changed). Re-enter the password and complete one terminal authorization — the integration will recover seamlessly.\n\n(Entities, history and configuration are all preserved; no device re-adding.)",
+        "data": {
+          "password": "Password"
+        }
+      },
       "device": {
         "title": "Select Device",
-        "description": "Select the lock device and enter the device credential pair.\n\n**Security code**: the 8-character uppercase alphanumeric code printed next to the QR/barcode on the device label (battery compartment), also shown in App > Device settings > About, or on the box.\n\n**Device password**: the current password after changing it in the LeChange app; if never changed it equals the security code — **leave empty**.\n\nUsed for: alarm snapshot decryption (security code) and live-stream frame decryption (device password). Stored locally only.",
+        "description": "Select the lock device to add.\n\n**Security code** (optional): the 8-character uppercase code printed next to the QR/barcode on the device label (battery compartment), also shown in App > Device settings > About, or on the box. Only needed for alarm snapshot decryption — **can be left empty and added later**.\n\n**Device password** (optional): the current password after changing it in the LeChange app; if never changed it equals the security code — **leave empty**.\n\nBoth credentials are stored locally and can be added or changed anytime via Settings > Devices & Services > LeChange Door Lock > Configure.",
         "data": {
           "device_id": "Device",
-          "security_code": "Security code (8 chars, device label)",
+          "security_code": "Security code (8 chars, device label; optional)",
           "device_password": "Device password (only if changed; empty = same as security code)"
         }
       }
@@ -45,39 +59,61 @@
       "no_devices": "No devices found under this account.",
       "network": "Network error, please retry later.",
       "unknown": "Unexpected error.",
-      "security_code_invalid": "Security code should be 8 uppercase letters/digits (see device label)."
+      "security_code_invalid": "Security code should be 8 uppercase letters/digits (see device label).",
+      "credit_failed": "Terminal authorization failed. Check the code and retry."
     },
     "abort": {
       "already_configured": "Device is already configured.",
       "device_not_found": "Selected device was not found.",
       "gt4_unavailable": "GT4 slider service is not available. Restart Home Assistant and retry.",
       "gt4_timeout": "GT4 slider timed out (no valid tuple received within 5 minutes).",
-      "gt4_failed": "GT4 verification failed. Check the log for details and retry."
+      "gt4_failed": "GT4 verification failed. Check the log for details and retry.",
+      "credit_unavailable": "Terminal authorization is unavailable: failed to load client credentials (OEM AK/SK). Update the integration or check env LECHANGE_OEM_AK/LECHANGE_OEM_SK.",
+      "credit_send_failed": "Failed to send the authorization SMS code. Retry later.",
+      "reauth_successful": "Re-authentication successful. The integration has recovered.",
+      "reauth_failed": "Re-authentication failed: the matching config entry was not found. Please remove and re-add the integration."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "Media & connection options",
-        "description": "Door-front snapshots use cloud stream capture (main stream by default; dual cameras combined side-by-side).\nSnapshot and live preview OSD are ON by default (timestamp top-left + channel bottom-right); can be disabled. Stream requests wake the battery device — keep the interval at 60s or more.",
+        "title": "Integration options",
+        "description": "Credentials, door-front snapshots and connection mode. Everything can be changed later; takes effect immediately after saving.",
         "data": {
-          "security_code": "Security code (empty = keep current)",
-          "device_password": "Device password (empty = keep / same as security code)",
-          "snapshot_min_interval": "Min snapshot interval (seconds, >=15)",
-          "rtsp_url": "Full RTSP/relay URL (optional)",
-          "rtsp_host": "LAN IP (empty = cloud only)",
+          "security_code": "Security code",
+          "device_password": "Device password",
+          "snapshot_min_interval": "Min snapshot interval (seconds)",
+          "snapshot_stream_id": "Cloud stream type",
+          "snapshot_osd": "Snapshot watermark",
+          "snapshot_osd_alpha": "Watermark background opacity",
+          "camera_auto_image": "Camera auto image",
+          "channel_hosts": "Local channel direct addresses",
+          "stream_preview_osd": "Live preview watermark",
+          "stream_preview_seconds": "Live preview duration (seconds)",
+          "rtsp_url": "Full RTSP URL (optional override)",
+          "rtsp_host": "LAN IP (optional)",
           "rtsp_port": "RTSP port",
           "rtsp_username": "RTSP username",
           "rtsp_password": "RTSP password",
-          "rtsp_subtype": "Stream (0 main / 1 sub)",
-          "snapshot_stream_id": "Stream (main by default)",
-          "snapshot_osd": "Snapshot OSD (default on: timestamp + channel name)",
-          "snapshot_osd_alpha": "OSD background opacity (0-255, 160 = ~63% translucent)",
-          "snapshot_layout": "Multi-channel layout (side-by-side / stacked / single)",
-          "snapshot_channel": "Channel for single-camera layout",
-          "channel_hosts": "Local channel addresses (one per line: channel=IP[:port]; used first when device is on LAN, empty = cloud)",
-          "stream_preview_osd": "Live preview OSD (default on; off = clean)",
-          "stream_preview_seconds": "Live preview duration (seconds, 3-60)"
+          "rtsp_subtype": "RTSP stream type"
+        },
+        "data_description": {
+          "security_code": "Security code",
+          "device_password": "The original device password is the machine's security code. If you never changed it, just enter the security code here. After changing it in the LeChange app, enter the current value. Used for live stream frame decryption (snapshots/preview); leave empty to keep current.",
+          "snapshot_min_interval": "Minimum interval between cloud door-front snapshots (15-3600s, default 60). Stream requests wake the battery lock; lower = more drain. Only throttles camera polling; manual service calls bypass it.",
+          "snapshot_stream_id": "Main stream (recommended; verified to carry data on the relay); sub stream saves bandwidth but the relay carries no data and auto-falls back to main.",
+          "snapshot_osd": "Burn timestamp (top-left) and channel name (bottom-right) onto snapshots. Off = clean original frame.",
+          "snapshot_osd_alpha": "Watermark background darkness 0-255 (default 160 = ~63% translucent). 0 = fully transparent, 255 = solid black.",
+          "camera_auto_image": "Master switch, default OFF: when off, camera entities stop fetching images automatically — cloud streams wake the battery lock and LAN snapshots keep the device active; both drain the battery. Off = zero automatic wake from camera cards (last cached frame is shown); the snapshot button and services still work manually. On = dashboard camera cards auto-refresh at the throttle interval (costs battery).",
+          "channel_hosts": "Local direct addresses, one per line \"channel=IP[:port]\". Examples — single camera / main only: 0=192.168.1.10:80 ; both cameras: 0=192.168.1.10:80 and 1=192.168.1.10:80 (port = device HTTP port, Dahua default 80, optional). When the device is on your LAN, snapshots/preview connect directly (no cloud, faster); leave empty = cloud only, auto-falls back to cloud when offline.",
+          "stream_preview_osd": "Burn timestamp and channel name onto live preview/recordings (default on).",
+          "stream_preview_seconds": "Single live-preview capture length 3-60s (default 10). The device stays awake during capture.",
+          "rtsp_url": "Full RTSP URL template, '{'channel'}' is replaced by the channel number (0=main, 1=secondary). Examples — go2rtc/ffmpeg relay: rtsp://192.168.1.5:8554/doorlock (without the placeholder both cameras share this address) ; Dahua native: rtsp://admin:password@192.168.1.10:554/cam/realmonitor?channel='{'channel'}'&subtype=0 (note the replacement is 0/1; if the device numbers channels from 1, build two streams in go2rtc instead). When set, the camera entity hands it to the HA stream component and skips cloud streaming; leave empty = cloud mode.",
+          "rtsp_host": "The lock's LAN IP (with credentials below, used for CGI snapshot). Empty = pure cloud mode (recommended; no device RTSP needed).",
+          "rtsp_port": "RTSP port, default 554.",
+          "rtsp_username": "Device RTSP/CGI username, default admin.",
+          "rtsp_password": "Device RTSP/CGI password (device credential, unrelated to your LeChange app account).",
+          "rtsp_subtype": "0 = main stream (HD, default), 1 = sub stream (smooth). Only affects the RTSP/CGI direct path."
         }
       }
     }
@@ -98,8 +134,8 @@
       "door_state": {
         "name": "Door state",
         "state": {
-          "closed": "Closed",
-          "open": "Open",
+          "closed": "Locked",
+          "open": "Unlocked",
           "unknown": "Unknown"
         }
       },
@@ -182,7 +218,35 @@
     },
     "select": {
       "snapkey_weekday_mode": {
-        "name": "Snapkey weekdays"
+        "name": "Snapkey weekdays",
+        "state": {
+          "Every day": "Every day",
+          "Weekdays": "Weekdays",
+          "Weekend": "Weekend",
+          "Monday": "Monday",
+          "Tuesday": "Tuesday",
+          "Wednesday": "Wednesday",
+          "Thursday": "Thursday",
+          "Friday": "Friday",
+          "Saturday": "Saturday",
+          "Sunday": "Sunday"
+        }
+      },
+      "snapshot_channels": {
+        "name": "Snapshot channels",
+        "state": {
+          "0+1": "Dual camera (ch0+1)",
+          "0": "Channel 0 only (peephole)",
+          "1": "Channel 1 only (secondary)"
+        }
+      },
+      "snapshot_layout": {
+        "name": "Dual-camera layout",
+        "state": {
+          "hstack": "Side-by-side",
+          "vstack": "Stacked",
+          "single": "Single camera"
+        }
       }
     },
     "text": {

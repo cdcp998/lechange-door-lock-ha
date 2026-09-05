@@ -291,6 +291,7 @@ class ImouClient:
         internal_username: str = "",
         api_host: str = "",
         on_session_update=None,
+        on_login_blocked=None,
         terminal_id: str = "",
     ):
         self._session = session
@@ -300,9 +301,11 @@ class ImouClient:
         self.token = token
         self.internal_username = internal_username
         self.api_host = api_host or API_ENTRY_HOST
-        # 独立终端标识(与手机 App 不同 → 不互顶;集成侧由 entry.options 持久化)
-        # UUID 格式(App 同款);旧 lechange-hass-* 由 coordinator 一次性迁移。
+        # 独立终端标识(与手机 App 不同 → 不互顶;集成侧由 entry 持久化)
+        # UUID 格式(App 同款);须与授权链(config_flow)所用完全一致。
         self.terminal_id = terminal_id or str(_uuid.uuid4()).upper()
+        # 12112 终端拦截通知 callable(code) -> None(reauth 引导重新授权)
+        self._on_login_blocked = on_login_blocked
 
         self._model_cache: dict[str, "ModelInfo"] = {}
         self._on_session_update = on_session_update  # callable(session dict) -> None
@@ -377,8 +380,20 @@ class ImouClient:
             "account\\" + username, key1, key2, session_id=self.session_id or None,
             terminal_id=self.terminal_id,
         )
-        data = await self._http_post(self.api_host, API_PREFIX + "user.account.GetToken",
-                                     body, headers)
+        try:
+            data = await self._http_post(self.api_host,
+                                         API_PREFIX + "user.account.GetToken",
+                                         body, headers)
+        except ImouAPIError as err:
+            # ★ 钩子挂在 async_login 本身(而非仅 evergreen):
+            #   async_post 自动重登/业务调用/轮询任一路径的 12112/12001
+            #   都必须触发 reauth 引导, 否则用户永远看不到修复提示。
+            if err.code in (12112, 12001) and self._on_login_blocked:
+                try:
+                    self._on_login_blocked(err.code)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("on_login_blocked callback failed")
+            raise
         self.username = username
         self.password = password
         # 10000+无token(仅 failNum) = 账号已有活跃 token — 保持现会话不动,
@@ -406,6 +421,12 @@ class ImouClient:
                 _LOGGER.warning("GT4 challenge required (risk-state); run gt4.html slider")
             elif err.code == 10001:
                 _LOGGER.info("Account already has a live token elsewhere; session kept")
+            elif err.code in (12112, 12001):
+                # 通知已由 async_login 内钩子发出(覆盖所有重登路径), 此处仅记日志
+                _LOGGER.warning(
+                    "Login blocked by terminal management (code %s) — reauth required",
+                    err.code,
+                )
             raise
 
     # ------------------------------------------------------- GT4
@@ -496,6 +517,54 @@ class ImouClient:
         self.username = self.username or ""
         return await self._apply_login_response(self.username, data)
 
+    async def async_granting_credit_ak(
+        self, valid_code: str, account_enc: Optional[str] = None,
+    ) -> dict:
+        """终端授权提交(登录前, default 前缀 AK 身份) — 12112 授权链②.
+
+        真机协议(04-终端绑定与账号安全.md §5/§8, mitmproxy 全量解密):
+          - 无 CheckValidCode 中间步: validCode 直传短信验证码原码
+          - type 固定 "phone"; account AES-GCM 加密(isEncrypt=true)
+          - 身份 = default\\OEM_AK + SK 单哈希(与 GetTokenBySMS-AK/CheckGeeTest4 同通道)
+        授权后同一验证码可复用于 GetTokenBySMS 完成登录(服务端不消费原码),
+        终端入账号授权清单 → 之后密码 GetToken 不再被 12112 拦截。
+        """
+        if not OEM_AK or not OEM_SK:
+            raise ImouAPIError(
+                -1, "OEM AK/SK not configured (LECHANGE_OEM_AK/LECHANGE_OEM_SK)"
+            )
+        enc = account_enc or _enc_account(self.username)
+        if enc is None:
+            _LOGGER.warning("未安装 pycryptodome,终端授权改用明文提交(可能被服务端拒绝)")
+            enc, is_encrypt = self.username or "", False
+        else:
+            is_encrypt = True
+        payload = {"account": enc, "isEncrypt": is_encrypt,
+                   "type": "phone", "validCode": valid_code}
+        body = json.dumps({"data": payload}, separators=(",", ":")).encode()
+        key1 = _md5_hex_lower(OEM_SK)
+        key2 = _sha256_hex_lower(OEM_SK)
+        headers = _sign_payload(
+            "POST", API_PREFIX + "user.account.GrantingCredit", body,
+            "default\\" + OEM_AK, key1, key2, session_id=self.session_id or None,
+            terminal_id=self.terminal_id,
+        )
+        return await self._http_post(self.api_host,
+                                     API_PREFIX + "user.account.GrantingCredit",
+                                     body, headers)
+
+    async def async_send_credit_code_gt4(
+        self, usage: str = "GrantingCredit", account_enc: Optional[str] = None,
+    ) -> dict:
+        """发送终端授权验证码(12112 链①, 登录前) — GetValidCode(usage=GrantingCredit).
+
+        真机协议(04-终端绑定与账号安全.md §5): 登录前 default 前缀 AK 身份,
+        account AES-GCM 加密, areaCode 为空串。与 async_send_sms_code_gt4 同通道,
+        仅 usage 不同(GrantingCredit 不需要 GT4 前置)。
+        """
+        return await self.async_send_sms_code_gt4(
+            usage=usage, account_enc=account_enc
+        )
 
     # ------------------------------------------------------- 短信验证码登录
     async def async_send_sms_code(
@@ -617,12 +686,15 @@ class ImouClient:
             })
 
     # ------------------------------------------------------------- transport
-    async def _http_post(self, host: str, path: str, body: bytes, headers: dict) -> dict:
+    async def _http_post(
+        self, host: str, path: str, body: bytes, headers: dict,
+        timeout: Optional[float] = None,
+    ) -> dict:
         """POST and return parsed JSON (raising ImouAPIError on bad code/status)."""
         last_err: Optional[Exception] = None
         for ctx in _SSL_CONTEXTS:
             try:
-                async with asyncio.timeout(CONNECT_TIMEOUT):
+                async with asyncio.timeout(timeout or CONNECT_TIMEOUT):
                     resp = await self._session.post(
                         host + path, data=body, headers=headers, ssl=ctx
                     )
@@ -653,11 +725,14 @@ class ImouClient:
         retry_auth: bool = True,
         apiver: str = APIVER,
         content_type: str = "application/json; charset=utf-8",
+        timeout: Optional[float] = None,
     ) -> dict:
         """Signed POST to `/pcs/v1/{api_name}` with session headers.
 
         apiver/content_type 分域:用户/设备域默认 191204+utf-8;
         消息域(iot.message.*/服务端生成类)调用方传 "V10.2.2"+"charset=UTF-8"。
+        timeout: 覆盖默认 HTTP 超时(GetProperties 带设备应答等待
+        timeout:15000ms 时必须给更长, 否则 HTTP 层先断)。
         """
         await self.async_ensure_session()
         body = json.dumps({"data": payload}, separators=(",", ":")).encode()
@@ -668,7 +743,9 @@ class ImouClient:
             apiver=apiver, content_type=content_type, terminal_id=self.terminal_id,
         )
         try:
-            return await self._http_post(self.api_host, API_PREFIX + api_name, body, headers)
+            return await self._http_post(
+                self.api_host, API_PREFIX + api_name, body, headers, timeout=timeout
+            )
         except ImouAPIError as err:
             if err.code in AUTH_FAIL_CODES and retry_auth and self.username and self.password:
                 _LOGGER.warning("Session invalid (%s), re-logging in...", err.code)
@@ -733,12 +810,34 @@ class ImouClient:
     async def async_get_device_info(
         self, device_id: str, product_id: str, channel_id: str = "0"
     ) -> dict:
-        """单设备完整详情 (device.info.BasicInfoGet)."""
+        """单设备完整详情 (device.info.BasicInfoGetV2).
+
+        ★ V2 的 propertiesMap 更新鲜(实测 10000; 文档: V2 单设备,
+          propertiesMap 更新鲜) — 童锁/WiFi/门状态的休眠期快照来源。
+        """
         data = await self.async_post(
-            "device.info.BasicInfoGet",
+            "device.info.BasicInfoGetV2",
             {"productId": product_id, "deviceId": device_id, "channelId": channel_id},
         )
         return self._normalize_device(data)
+
+    async def async_get_device_detail_info(
+        self, device_id: str, product_id: str
+    ) -> dict:
+        """设备详情+云端属性缓存 (iot.manager.GetDeviceDetailInfo).
+
+        ★ App 打开设备页实际调用的接口(抓包 20260905 实证):
+          {productId, deviceId, needSubDevices:1} →
+          data.properties = {ref: value} **云端属性缓存**(76 个 ref,
+          设备休眠也可读) —— 含 wifiDoorLock(106000 ssid/信号/状态)、
+          doorLockState(108000)、devicePowerLock(106200)、通道名等;
+          注意 child_lock(120000)/doorLockStatus(102800) 不在云端
+          缓存(仅实时属性, 设备应答时由 GetProperties 获得)。
+        """
+        return await self.async_post(
+            "iot.manager.GetDeviceDetailInfo",
+            {"productId": product_id, "deviceId": device_id, "needSubDevices": 1},
+        )
 
     async def async_get_devices(self) -> list[dict]:
         """List all devices (lock devices carry catalog=SmartLock).
@@ -791,14 +890,37 @@ class ImouClient:
         return info
 
     # ---------------------------------------------------------- state/control
+    # GetProperties 显式属性列表(App 同款, identifier 名; 实测裸调不带列表
+    # 时休眠设备空回/10003, 带列表+timeout+qos 才会等待设备应答)
+    CORE_PROPERTY_IDENTIFIERS = (
+        "doorLockState", "doorLockStatus", "powerState", "powerMode",
+        "devicePowerLock", "tamper", "child_lock", "openDoorByTouch",
+        "wifiDoorLock", "lockNoteReport", "sleepStatus",
+    )
+
     async def async_get_properties(
-        self, device_id: str, product_id: str, channel_id: str = "0"
+        self, device_id: str, product_id: str, channel_id: str = "0",
+        properties: Optional[list] = None,
     ) -> dict[str, Any]:
-        """Read all properties of one channel; returns {identifier: typed value}."""
+        """Read properties of one channel; returns {identifier: typed value}.
+
+        ★ 必须显式带 properties 列表 + timeout + qos(App 抓包同款):
+          裸调不带列表 → 服务端立即返回(休眠设备=空/10003);
+          带列表 → 服务端等待设备应答(最长 timeout ms), 童锁/WiFi/
+          门状态等实时值由此获得。
+        """
         model = await self.async_get_model(device_id, product_id)
+        payload = {
+            "deviceId": device_id,
+            "productId": product_id,
+            "channelId": channel_id,
+            "properties": list(properties or self.CORE_PROPERTY_IDENTIFIERS),
+            "timeout": 15000,
+            "qos": 1,
+        }
+        # 服务端最长等设备应答 15s → HTTP 超时必须给更长(20s)
         data = await self.async_post(
-            "iot.control.GetProperties",
-            {"deviceId": device_id, "productId": product_id, "channelId": channel_id},
+            "iot.control.GetProperties", payload, timeout=20.0
         )
         props = data.get("properties") or data or {}
         return model.decode_properties(props)

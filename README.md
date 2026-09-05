@@ -216,9 +216,9 @@ CI(`.github/workflows/hacs.yml`)同时运行 [HACS Action](https://github.com/ha
   顶替,被顶一端自动重登恢复;这是服务端行为,表现为短暂互踢后各自恢复,属正常现象。
 - **终端管理账号**：集成使用线上安卓客户端特征终端(clientType=android + 常见机型特征 +
   安装时固定生成的 terminalId,持久化于集成选项,不与手机 App 同终端)。若账号开启
-  终端管理,首次登录会要求终端授权(错误码 12112):集成侧可发送授权验证码
-  (服务 `lechange_door_lock.send_sms_code`,usage=GrantingCredit),输入验证码后按
-  线上协议提交授权。
+  终端管理,首次密码登录会被拦截(错误码 12112,与密码正确性无关):配置流程会自动
+  进入「终端授权验证」步骤——发送授权短信验证码 → 输入 6 位验证码 → 终端入白名单
+  并自动完成登录,全程无需打开乐橙 App。
 
 ### 📜 更新日志
 统一更新日志见 [CHANGELOG.md](CHANGELOG.md)(发布时 CI 会自动提取并作为 Release 说明)。

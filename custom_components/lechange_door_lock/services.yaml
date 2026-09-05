@@ -22,6 +22,61 @@ wake_up_device:
       selector:
         text:
 
+reload_data:
+  name: Reload data
+  description: Force-reload all device data (snapshot + properties + alarms + device-registry calibration). Uses the persisted session via EVERGREEN auto-renewal — no re-login needed.
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+      required: true
+      example: "600EBBDRSF00000"
+      selector:
+        text:
+    wake:
+      name: Wake device first
+      description: "Try to wake the sleeping device before reloading (properties like child lock / WiFi are only readable while the device answers)."
+      required: false
+      default: false
+      selector:
+        boolean:
+
+dump_diagnostics:
+  name: Dump diagnostics
+  description: "Dump raw API responses (GetProperties / V2 snapshot / device list) and decoded keys — fires a lechange_door_lock_event with type=diagnostics. Use when an entity shows unknown/unavailable."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+      required: true
+      example: "600EBBDRSF00000"
+      selector:
+        text:
+
+set_credentials:
+  name: Set credentials
+  description: "Explicitly set or erase the security code / device password (verification & recovery; immediate effect). Omit a field to leave it unchanged; pass an empty string to erase. Erasing the device password breaks snapshot/preview decryption unless you never changed it in the app."
+  fields:
+    device_id:
+      name: Device ID
+      description: The device serial number.
+      required: true
+      example: "600EBBDRSF00000"
+      selector:
+        text:
+    security_code:
+      name: Security code
+      description: "Set the security code; pass an empty string to erase."
+      required: false
+      selector:
+        text:
+    device_password:
+      name: Device password
+      description: "Set the device password; pass an empty string to erase (stream decryption falls back to security code)."
+      required: false
+      selector:
+        text:
+
 call_answer:
   name: Answer doorbell call
   description: Answer the doorbell call (CallAnswer).
@@ -109,17 +164,17 @@ get_voice_reply:
         select:
           options:
             - label: quickReply
-              value: 4
+              value: "4"
             - label: reply
-              value: 2
+              value: "2"
             - label: device
-              value: 0
+              value: "0"
             - label: accessory
-              value: 1
+              value: "1"
             - label: local
-              value: 3
+              value: "3"
             - label: chime
-              value: 5
+              value: "5"
 
 set_voice_reply:
   name: Set voice reply
@@ -151,17 +206,17 @@ set_voice_reply:
         select:
           options:
             - label: quickReply
-              value: 4
+              value: "4"
             - label: reply
-              value: 2
+              value: "2"
             - label: device
-              value: 0
+              value: "0"
             - label: accessory
-              value: 1
+              value: "1"
             - label: local
-              value: 3
+              value: "3"
             - label: chime
-              value: 5
+              value: "5"
     time_stab:
       name: Time stamp
       description: Request timestamp (0-999999).

@@ -212,7 +212,11 @@ class MqttClient:
     async def async_connect(self) -> None:
         """连接并完成 CONNECT/CONNACK/SUBSCRIBE(失败抛异常)."""
         self._loop = asyncio.get_running_loop()
-        ctx = _tls_context(self.certs_dir)
+        # ssl.create_default_context()/证书文件读取是阻塞调用 —
+        # HA 2026 起在事件循环内执行会被判违规, 必须移入 executor
+        ctx = await self._loop.run_in_executor(
+            None, _tls_context, self.certs_dir
+        )
         try:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(

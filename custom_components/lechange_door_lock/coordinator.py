@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import random
+import time
 import uuid
 from datetime import timedelta
 from typing import Any, Optional
@@ -47,6 +48,8 @@ from .state_utils import (
     build_usage_period,
     derive_lock_state,
     extract_batteries,
+    extract_latest_open_record,
+    inherit_previous,
     normalize_wifi,
     _int_or_none,
 )
@@ -67,37 +70,80 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
 
         client_session = async_get_clientsession(hass)
         # 独立终端标识:安装时生成一次并持久化(不与手机 App 同终端 → 不互相顶号)
-        # v1.4.1+:迁移为 App 同款标准 UUID(旧 lechange-hass-* 为 PC 时代格式)
-        terminal_id = str((entry.options or {}).get("terminal_id", ""))
-        if not terminal_id or terminal_id.startswith("lechange-hass-"):
+        # ★ 必须与 config_flow 授权链所用 terminal_id 完全一致 — 服务端按
+        #   UA terminalId 记忆授权清单;不一致则重登时 12112 → MQTT 12001 循环。
+        # ★ 任何非空 tid 都直接使用(包括旧版 lechange-hass- 前缀) ——
+        #   那就是历史已授权终端;重新生成 = 12112 → 强制 reauth →
+        #   用户终端管理列表 +1(升级即换终端的 BUG, 已修)。
+        #   空 tid 的兜底生成在 async_setup_entry(异步)里走安装级存储链。
+        terminal_id = str((entry.data or {}).get("terminal_id")
+                          or (entry.options or {}).get("terminal_id") or "")
+        if terminal_id and terminal_id.startswith("lechange-hass-"):
+            _LOGGER.warning(
+                "Using legacy terminal_id %s… (already authorized); "
+                "do NOT regenerate", terminal_id[:8],
+            )
+        if not terminal_id:
+            # 仅当条目完全没有 tid 时兜底(正常路径由 async_setup_entry
+            # 的安装级存储解析提前写入)
             terminal_id = str(uuid.uuid4()).upper()
             hass.config_entries.async_update_entry(
                 entry, options={**(entry.options or {}), "terminal_id": terminal_id}
             )
-        self.api = ImouClient(
-            client_session,
-            username=entry.data.get(CONF_USERNAME, ""),
-            password=entry.data.get(CONF_PASSWORD, ""),
-            session_id=entry.data.get(CONF_SESSION_ID, ""),
-            token=entry.data.get(CONF_TOKEN, ""),
-            internal_username=entry.data.get(CONF_INTERNAL_USERNAME, ""),
-            api_host=entry.data.get(CONF_API_HOST, ""),
-            on_session_update=self._persist_session,
-            terminal_id=terminal_id,
+        # ★ 账号级共享运行时: 同账号同终端的条目共用一条云会话与一条 MQTT
+        #   连接(对齐真机 App 形态)。各自登录会互踢单活跃 token(10001)，
+        #   各自 MQTT 建连会因 clientId(terminal 派生)相同互相接管踢线 ——
+        #   这两类都是多设备场景的"数据干扰"根源。共享后推送按 deviceId
+        #   归属分发(AccountMqttHub), 设备层数据仍然严格隔离。
+        #   terminal_id 不同的 legacy 条目回退旧行为(独立会话/连接)。
+        from .account_runtime import resolve_account_runtime
+
+        username = str(entry.data.get(CONF_USERNAME, "") or "")
+        self._account_runtime, _shared = resolve_account_runtime(
+            hass, username, terminal_id
         )
+        if _shared:
+            self.api = self._account_runtime.ensure_client(
+                client_session, entry, terminal_id
+            )
+            # 回调接账号级扇出(共享 client 只有一组回调槽位, 不能让后
+            # setup 的条目覆盖前条目的): 会话持久化 → 全条目扇出;
+            # 12112 终端拦截 → 广播给所有活动条目(各自 reauth 引导)。
+            self._account_runtime.bind_client_callbacks(self.api)
+            self._account_runtime.add_block_listener(self._on_login_blocked)
+            self._account_runtime.mark_entry_active(entry.entry_id)
+        else:
+            self.api = ImouClient(
+                client_session,
+                username=entry.data.get(CONF_USERNAME, ""),
+                password=entry.data.get(CONF_PASSWORD, ""),
+                session_id=entry.data.get(CONF_SESSION_ID, ""),
+                token=entry.data.get(CONF_TOKEN, ""),
+                internal_username=entry.data.get(CONF_INTERNAL_USERNAME, ""),
+                api_host=entry.data.get(CONF_API_HOST, ""),
+                on_session_update=self._persist_session,
+                on_login_blocked=self._on_login_blocked,
+                terminal_id=terminal_id,
+            )
 
         # 云端媒体管理(门外截图节流/缓存 + 告警图解码, 依赖安全码/设备密码)
         self.media = MediaManager(self)
 
         # MQTT 实时通道: 状态推送 + 控制优先 MQTT, 云 API 兜底
-        self.mqtt = MqttManager(
-            self.api,
-            self.device_id,
-            self.product_id,
-            cloud_ctrl=self._mqtt_cloud_ctrl,
-            on_event=self._mqtt_on_event,
-            certs_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs"),
-        )
+        # 共享模式 → 条目级 facade(背后是账号级 hub, 按 deviceId 分发);
+        # 隔离模式(legacy 混合终端) → 独立 MqttManager(原行为)。
+        if _shared:
+            self.mqtt = self._account_runtime.facade(self.device_id)
+            self.mqtt.bind(self._mqtt_on_event)
+        else:
+            self.mqtt = MqttManager(
+                self.api,
+                self.device_id,
+                self.product_id,
+                cloud_ctrl=self._mqtt_cloud_ctrl,
+                on_event=self._mqtt_on_event,
+                certs_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs"),
+            )
 
         self._seen_lock_notes: set[str] = set()
         self._seen_alarm_ids: set[int] = set()
@@ -140,9 +186,67 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         self.hass.config_entries.async_update_entry(self.entry, data=data)
         _LOGGER.debug("Persisted new session")
 
+    def _on_login_blocked(self, code: int) -> None:
+        """登录被终端管理拦截(12112/12001) → 一次性引导重新认证(reauth)."""
+        if getattr(self, "_reauth_started", False):
+            return
+        self._reauth_started = True
+        _LOGGER.warning(
+            "Terminal authorization required (code %s) — starting reauth flow "
+            "for entry %s", code, self.entry.entry_id,
+        )
+        try:
+            self.entry.async_start_reauth(self.hass)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Starting reauth failed")
+
     @property
     def device_name(self) -> str:
         return self.entry.data.get(CONF_DEVICE_NAME) or self.entry.title
+
+    async def ensure_awake(self, max_wait: float = 15.0) -> bool:
+        """确保设备在线(休眠则经取流请求唤醒, 该请求自带唤醒语义).
+
+        用于属性写入前(SetProperties 是设备面命令, 设备休眠时必然
+        19999/device error -1)。返回 True=设备已在线(或本就在线)。
+        """
+        try:
+            snapshot = await self.async_get_device_snapshot()
+            status = (snapshot or {}).get("status")
+            if status == STATUS_ONLINE:
+                return True
+            if status and status != STATUS_SLEEP:
+                # 未知状态: 也尝试继续(不阻塞)
+                return True
+            # 唤醒: 取流 URL 请求自带唤醒语义(~5s 上线), 不真正取流
+            try:
+                await self.api.async_get_transfer_stream_url(
+                    self.device_id, self.product_id, "0", "1"
+                )
+            except Exception as err:  # noqa: BLE001 — 唤醒尽力而为
+                _LOGGER.debug("Wake request failed (continuing): %s", err)
+            # 轮询等设备上线
+            import asyncio as _aio
+
+            waited = 0.0
+            while waited < max_wait:
+                await _aio.sleep(2.0)
+                waited += 2.0
+                try:
+                    snapshot = await self.async_get_device_snapshot()
+                    if (snapshot or {}).get("status") == STATUS_ONLINE:
+                        _LOGGER.info("Device %s awake after %.0fs", self.device_id, waited)
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+            _LOGGER.warning(
+                "Device %s still sleeping after %.0fs wake wait",
+                self.device_id, max_wait,
+            )
+            return False
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("ensure_awake failed: %s", err)
+            return False
 
     async def async_get_device_snapshot(self) -> Optional[dict]:
         """Fetch this device's full info (device.info.BasicInfoGet) with fallback."""
@@ -158,6 +262,7 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict:
         """Fetch device status + all IoT properties."""
+        prev = self.data if isinstance(self.data, dict) else None
         data: dict[str, Any] = {"last_error": None}
         props: dict[str, Any] = {}
 
@@ -179,46 +284,125 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             data["last_error"] = str(err)
             data["online"] = False
             data["sleeping"] = True
-            return data
+            # 休眠/网络抖动: 继承上次展示数据(实体不清空), 仅错误状态更新
+            return inherit_previous(prev, data)
 
-        # 设备休眠时 IoT 调用会返回 10003,此时保留上次状态
+        # ★ 主路径: 带显式属性列表的 GetProperties(App 抓包同款,
+        #   timeout=15s + qos=1)。裸调不带列表时服务端立即空回(休眠
+        #   设备 10003/空 properties) — 这是"电量有(列表快照缓存)而
+        #   童锁/WiFi/门状态全缺"的根因。带列表后服务端会等待设备
+        #   应答, 在线/唤醒窗口内返回实时值。
         try:
             props = await self.api.async_get_properties(
                 self.device_id, self.product_id, self.channel_id
             )
         except ImouAPIError as err:
-            _LOGGER.warning("GetProperties failed: %s", err)
-            data["last_error"] = str(err)
+            if err.code == 10003:
+                _LOGGER.debug("GetProperties 10003 (device sleeping/asleep) — using snapshot")
+            else:
+                _LOGGER.warning("GetProperties failed: %s", err)
+                data["last_error"] = str(err)
             data["props_ok"] = False
-            # 列表接口自带的 propertiesMap 是设备最近上报快照(设备休眠也可用)
+            # 降级: V2 快照 propertiesMap(设备最近上报, 休眠也可用)
             props = await self._decode_properties_map(data.get("properties_map", ""))
         else:
             data["props_ok"] = True
 
-        data["props"] = props
+        # 降级链(核心键仍缺, 设备睡死/超时时, 60s 节流):
+        # ① iot.manager.GetDeviceDetailInfo 云端属性缓存(App 设备页同款,
+        #   抓包 20260905 实证: 76 个 ref, 休眠可读, 含 wifiDoorLock/
+        #   doorLockState/devicePowerLock/通道名/sdl_inOpenDoorModel(童锁)
+        #   — 注意 child_lock/doorLockStatus 为纯实时属性, 云端无缓存)
+        core_keys = ("child_lock", "devicePowerLock", "wifiDoorLock", "doorLockStatus")
+        missing = [
+            k for k in core_keys
+            if k not in props and not (k == "child_lock" and "sdl_inOpenDoorModel" in props)
+        ]
+        if missing:
+            now = time.monotonic()
+            if now - getattr(self, "_last_fill_attempt", 0.0) >= 60.0:
+                self._last_fill_attempt = now
+                filled: list[str] = []
+                # ① GetDeviceDetailInfo 云端属性缓存(休眠可读)
+                try:
+                    detail = await self.api.async_get_device_detail_info(
+                        self.device_id, self.product_id
+                    )
+                    detail_props = detail.get("properties") or {}
+                    if isinstance(detail_props, dict) and detail_props:
+                        decoded_detail = await self._decode_properties_map(
+                            detail_props
+                        )
+                        for k, v in decoded_detail.items():
+                            props.setdefault(k, v)
+                        filled = [k for k in missing if k in props]
+                        data["properties_map"] = json.dumps(
+                            detail_props, ensure_ascii=False
+                        )
+                except Exception as err2:  # noqa: BLE001 — 兜底绝不失败收场
+                    _LOGGER.debug("GetDeviceDetailInfo fallback failed: %s", err2)
+                # ② ③ propertiesMap 快照(仍缺则再补)
+                still = [k for k in missing if k not in props]
+                if still:
+                    snapshot_map = ""
+                    try:
+                        dev_info = await self.api.async_get_device_info(
+                            self.device_id, self.product_id
+                        )
+                        snapshot_map = dev_info.get("properties_map") or ""
+                    except Exception as err3:  # noqa: BLE001
+                        _LOGGER.debug("BasicInfoGetV2 fallback failed: %s", err3)
+                    if not snapshot_map:
+                        try:
+                            for dev in await self.api.async_get_devices():
+                                if (dev.get("deviceId") == self.device_id
+                                        and dev.get("properties_map")):
+                                    snapshot_map = dev["properties_map"]
+                                    break
+                        except Exception as err4:  # noqa: BLE001
+                            _LOGGER.debug("Device list fallback failed: %s", err4)
+                    if snapshot_map:
+                        decoded = await self._decode_properties_map(snapshot_map)
+                        for k, v in decoded.items():
+                            props.setdefault(k, v)
+                        data["properties_map"] = snapshot_map
+                        filled = [k for k in missing if k in props]
+                _LOGGER.debug(
+                    "Core-props fill from cache/snapshot: %s; still missing: %s",
+                    filled or "none",
+                    [k for k in missing if k not in props] or "none",
+                )
 
-        # ---- derived fields ------------------------------------------------
-        data["door_lock_status"] = _int_or_none(props.get("doorLockStatus"))
-        data["battery_lock"], data["battery_camera"] = extract_batteries(props)
-        data["wifi"] = normalize_wifi(props)
+        # 本次拿到属性才覆盖;空 props(休眠且快照缺)时保留上次值,
+        # 避免 MQTT 刚推的实时状态/电量/记录被轮询清零
+        if props:
+            data["props"] = props
+
+        # ---- derived fields(仅本次有对应原始字段时覆盖) --------------------
+        if "doorLockStatus" in props:
+            data["door_lock_status"] = _int_or_none(props.get("doorLockStatus"))
+        if "devicePowerLock" in props:
+            data["battery_lock"], data["battery_camera"] = extract_batteries(props)
+        if "wifiDoorLock" in props:
+            data["wifi"] = normalize_wifi(props)
 
         notes = props.get(PROP_LOCK_NOTE_REPORT) or []
-        if isinstance(notes, list):
+        if isinstance(notes, list) and notes:
             data["lock_notes"] = notes
             data["latest_open_door_record"] = (
-                dict(notes[-1]) if notes and isinstance(notes[-1], dict) else {}
+                dict(notes[-1]) if isinstance(notes[-1], dict) else {}
             )
             self._fire_new_lock_notes(notes)
-        else:
+        elif "lockNoteReport" in props:
             data["lock_notes"] = []
             data["latest_open_door_record"] = {}
 
         ch_names = props.get(PROP_CHANNEL_NAMES) or []
-        if isinstance(ch_names, list):
+        if isinstance(ch_names, list) and ch_names:
             data["channel_names"] = {
                 str(c.get("chn")): c.get("name", "") for c in ch_names if isinstance(c, dict)
             }
-        else:
+        elif PROP_CHANNEL_NAMES in props:
             data["channel_names"] = {}
 
         # ---- 云侧告警(设备休眠也可用) ------------------------------------
@@ -234,8 +418,26 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         except ImouAPIError as err:
             _LOGGER.debug("Alarm messages unavailable: %s", err)
 
-        _LOGGER.debug("Coordinator data updated: %s", data)
-        return data
+        # ---- 临时密码列表(云侧, 设备休眠也可用; 每轮询自动刷新) ------------
+        try:
+            secret = await self.api.async_smart_lock_secret_list(
+                self.device_id, self.product_id, types=3
+            )
+            # secrets[] 才是临时密码(secretGroups[] 是 80 个固定分组槽位)
+            if isinstance(secret, dict):
+                self.set_snapkey_list(secret.get("secrets") or [])
+        except ImouAPIError as err:
+            _LOGGER.debug("Secret list unavailable: %s", err)
+
+        # ---- 开门记录双通道合并(属性 vs 云侧告警, 休眠期告警兜底) ----------
+        merged = extract_latest_open_record(
+            data.get("latest_open_door_record"), data.get("latest_alarm")
+        )
+        if merged:
+            data["latest_open_door_record"] = merged
+
+        # 休眠韧性收尾: 本次未产出的展示字段继承上次值(绝不清零)
+        return inherit_previous(prev, data)
 
     async def _decode_properties_map(self, raw: str) -> dict:
         """Decode the device-list propertiesMap (ref-keyed snapshot) via model."""
@@ -395,7 +597,18 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             return
 
         registry = dr.async_get(self.hass)
-        device_entry = registry.async_get_device(identifiers={(DOMAIN, self.device_id)})
+        # HA 2026.7+: async_get_device 弃用(标识符跨 entry 不再唯一),
+        # 新 API 为 async_get_device_by_identifier(identifier, config_entry_id);
+        # 旧版本回退 async_get_device(identifiers=...)
+        getter = getattr(registry, "async_get_device_by_identifier", None)
+        if getter is not None:
+            device_entry = getter(
+                (DOMAIN, self.device_id), self.entry.entry_id
+            )
+        else:
+            device_entry = registry.async_get_device(
+                identifiers={(DOMAIN, self.device_id)}
+            )
         if not device_entry:
             return
 
@@ -437,9 +650,25 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         return await self.api.async_post(api, params)
 
     async def _mqtt_on_event(self, data: dict) -> None:
-        """MQTT 推送 → 解码属性 → 实时更新 data/实体(完整数据仍靠轮询兜底)."""
+        """MQTT 推送 → 解码属性 → 实时更新 data/实体(完整数据仍靠轮询兜底).
+
+        ★ 数据隔离防线(与 mqtt.AccountMqttHub 的 deviceId 分发互补):
+          推送先验归属 —— 只接受本条目 deviceId 的消息; 即使经 legacy
+          独立连接或未来某层漏过他设备推送, 也绝不合并进本条目数据。
+        """
         topic = data.get("topic") or ""
         msg = data.get("msg") or {}
+        # 归属校验: iot_response 是自己请求的响应(已按 seq 消费, 正常不会
+        # 到这里); android_iot_property 等推送必须携带本条目 deviceId。
+        from .mqtt import extract_device_id
+
+        pushed_device_id = extract_device_id(msg)
+        if topic != "iot_response" and pushed_device_id and pushed_device_id != self.device_id:
+            _LOGGER.debug(
+                "MQTT push for %s… ignored (entry device %s…)",
+                pushed_device_id[:6], self.device_id[:6],
+            )
+            return
         if topic == "iot_response":
             inner = (msg.get("params") or {}).get("data") or {}
             props = inner.get("properties") or {}
@@ -449,12 +678,19 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
                         self.device_id, self.product_id
                     )
                     decoded = model.decode_properties(props) if isinstance(props, dict) else {}
-                    # 合并实时属性到 data(实体 is_on 直接读取)
-                    new_data = dict(self.data or {})
-                    new_data["_mqtt_props"] = decoded
-                    new_data.setdefault("props", {}).update(decoded)
-                    new_data["mqtt_online"] = True
-                    self.async_set_updated_data(new_data)
+                    # 合并实时属性到 data(实体 is_on 直接读取)。
+                    # 非变更合并: 传入的 new_data 直接写回时 triggers 轮询监
+                    # 听器(CONST 警告刷屏); 仅在确有新值时提交。
+                    current = dict(self.data or {})
+                    merged_props = dict(current.get("props") or {})
+                    merged_props.update(decoded)
+                    changed = merged_props != current.get("props")
+                    if changed:
+                        new_data = dict(current)
+                        new_data["_mqtt_props"] = decoded
+                        new_data["props"] = merged_props
+                        new_data["mqtt_online"] = True
+                        self.async_set_updated_data(new_data)
                 except Exception:  # noqa: BLE001
                     _LOGGER.debug("MQTT props decode/update failed", exc_info=True)
             elif inner.get("code") == 10000:
@@ -469,9 +705,13 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
                     )
                     decoded = model.decode_properties(props) if isinstance(props, dict) else {}
                     if decoded:
-                        new_data = dict(self.data or {})
-                        new_data.setdefault("props", {}).update(decoded)
-                        self.async_set_updated_data(new_data)
+                        current = dict(self.data or {})
+                        merged_props = dict(current.get("props") or {})
+                        merged_props.update(decoded)
+                        if merged_props != current.get("props"):
+                            new_data = dict(current)
+                            new_data["props"] = merged_props
+                            self.async_set_updated_data(new_data)
                 except Exception:  # noqa: BLE001
                     _LOGGER.debug("MQTT property push decode failed", exc_info=True)
         _LOGGER.debug("MQTT event: topic=%s keys=%s", topic, list(msg.keys())[:5])
@@ -486,3 +726,13 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             self._device_info_update_unsub()
             self._device_info_update_unsub = None
         await self.mqtt.async_stop()
+        # 释放账号运行时的条目占位与回调注册; 账号下已无活动条目 →
+        # 清理运行时, 共享会话凭据不残留内存(下次 setup 从持久化 entry 重建)
+        try:
+            from .account_runtime import drop_account_runtime_if_idle
+
+            self._account_runtime.remove_block_listener(self._on_login_blocked)
+            self._account_runtime.unmark_entry_active(self.entry.entry_id)
+            drop_account_runtime_if_idle(self.hass, self.api.username)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Account runtime release failed", exc_info=True)
