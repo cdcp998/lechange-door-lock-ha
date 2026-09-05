@@ -199,6 +199,11 @@ class MqttClient:
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._connected = False
+        # 会话已建立(CONNACK rc=0): close 时需先发 DISCONNECT 优雅释放,
+        # 否则服务端视为异常掉线, 会话滞留至 keepalive 宽限超时 —— 期间同
+        # clientId(identifier 确定性派生)重连会被直接拒绝(CONNACK 前断开,
+        # "0 bytes read on a total of 1 expected bytes" 退避刷屏数分钟)
+        self._session_up = False
         self._seq = random.randint(1000, 9999)
         self._pending: dict[int, asyncio.Future] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -235,6 +240,7 @@ class MqttClient:
         if ptype != PKT_CONNACK or (payload and payload[0] != 0):
             rc = payload[0] if payload else -1
             raise ConnectionError(f"MQTT CONNACK failed rc={rc}")
+        self._session_up = True  # 服务端会话已建立(close 须发 DISCONNECT)
         # 订阅
         self._writer.write(_pkt_subscribe(
             [TOPIC_RESPONSE, TOPIC_REQUEST, TOPIC_PROPERTY], pid=1
@@ -256,6 +262,16 @@ class MqttClient:
         for task in (self._read_task, self._ping_task):
             if task:
                 task.cancel()
+        # 优雅释放会话: 服务端会话仍在(CONNACK 后未收到其主动断开)时,
+        # 先发 DISCONNECT 再关 TCP —— 让服务端立即回收会话, 同 clientId
+        # 的下一次连接(每小时凭据刷新/重载/重启)不会被拒之门外。
+        if self._session_up and self._writer:
+            self._session_up = False
+            try:
+                self._writer.write(bytes([PKT_DISCONNECT, 0x00]))
+                await asyncio.wait_for(self._writer.drain(), timeout=2.0)
+            except (OSError, asyncio.TimeoutError):
+                pass  # 尽力而为: socket 已坏则无需 DISCONNECT
         if self._writer:
             try:
                 self._writer.close()
@@ -304,11 +320,13 @@ class MqttClient:
                 elif ptype == PKT_DISCONNECT:
                     _LOGGER.warning("MQTT server disconnect")
                     self._connected = False
+                    self._session_up = False  # 服务端已回收会话
                     break
         except (asyncio.IncompleteReadError, ConnectionError, OSError) as err:
             if self._connected:
                 _LOGGER.warning("MQTT read loop ended: %s", err)
             self._connected = False
+            self._session_up = False  # 异常掉线: 会话状态不明, 不发 DISCONNECT
         finally:
             for fut in self._pending.values():
                 if not fut.done():

@@ -140,6 +140,10 @@ class MqttManager:
                 # 作废后下次重试强制向云 API 取新凭据(带 EVERGREEN 续期)。
                 self._last_creds = {}
                 self._creds_at = 0.0
+                # ★ 半开客户端必须关闭: connect 抛异常时 TLS socket 可能已
+                # 建立(CONNACK 前 EOF/认证拒绝) —— 不 close 则 socket 泄漏,
+                # 服务端滞留半开会话, 加剧同 clientId 后续连接被拒。
+                await mqtt.async_close()
                 raise
             self._mqtt = mqtt
             self._connected = True

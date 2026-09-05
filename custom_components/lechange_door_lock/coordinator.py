@@ -44,13 +44,13 @@ from .imou_client import ImouAPIError, ImouClient
 from .media import MediaManager
 from .mqtt import MqttManager
 from .state_utils import (
-    build_snapkey_periods,
     build_usage_period,
     derive_lock_state,
     extract_batteries,
     extract_latest_open_record,
     inherit_previous,
     normalize_wifi,
+    sort_records_by_time,
     _int_or_none,
 )
 
@@ -417,8 +417,13 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             )
             alarms = alarm_data.get("alarms") or []
             if isinstance(alarms, list):
-                data["alarms"] = [a for a in alarms if isinstance(a, dict)][-20:]
-                data["latest_alarm"] = data["alarms"][-1] if data["alarms"] else None
+                # ★ 按时间升序稳定排序: 云 API 返回顺序未文档化, 盲取末条
+                # 当最新会拿到旧记录(显示时间不对的根因); 缺时间的沉底。
+                valid = sort_records_by_time(
+                    [a for a in alarms if isinstance(a, dict)]
+                )
+                data["alarms"] = valid[-20:]
+                data["latest_alarm"] = valid[-1] if valid else None
                 self._fire_new_alarms(data["alarms"])
         except ImouAPIError as err:
             _LOGGER.debug("Alarm messages unavailable: %s", err)
@@ -435,8 +440,10 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Secret list unavailable: %s", err)
 
         # ---- 开门记录双通道合并(属性 vs 云侧告警, 休眠期告警兜底) ----------
+        # 传整批告警: 内部过滤开门类 + 按时间取最新(不依赖 API 顺序,
+        # 移动侦测/门铃等非开门告警不会混入"最近开门")
         merged = extract_latest_open_record(
-            data.get("latest_open_door_record"), data.get("latest_alarm")
+            data.get("latest_open_door_record"), data.get("alarms")
         )
         if merged:
             data["latest_open_door_record"] = merged
@@ -493,6 +500,19 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
                 EVENT_PREFIX, {"type": "alarm", "alarm": payload}
             )
 
+    # -------------------------------------------------------- 属性文本语言
+    @property
+    def language(self) -> str:
+        """属性展示文本语言(HA 实例语言).
+
+        HA 前端不翻译属性内容 —— 词映射由集成按 hass.config.language
+        产出(i18n.py 目录); 实时读取, 用户改语言无需重载集成。
+        """
+        try:
+            return str(getattr(self.hass.config, "language", "") or "")
+        except Exception:  # noqa: BLE001 — 测试桩/异常环境兜底
+            return ""
+
     # -------------------------------------------------------- 临时密码配置
     @property
     def snapkey_config(self) -> dict:
@@ -512,15 +532,6 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         self.hass.config_entries.async_update_entry(
             self.entry,
             options={**self.entry.options, CONF_SNAPKEY_CONFIG: config},
-        )
-
-    def get_snapkey_periods(self, config: Optional[dict] = None) -> list[dict]:
-        """Build CreateDeviceSnapkey effectPeriod from the persisted settings."""
-        config = config or self.snapkey_config
-        return build_snapkey_periods(
-            str(config.get("begin_time", "00:00:00")),
-            str(config.get("end_time", "23:59:59")),
-            str(config.get("weekday_mode", "Every day")),
         )
 
     def set_snapkey_result(self, result: dict) -> None:
@@ -552,30 +563,71 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         )
 
     async def async_create_snapkey_cloud(self, config: Optional[dict] = None) -> dict:
-        """生成临时密码:客户端自产 keyId/tempKey,
-        经消息域 `iot.message.SmartLockSecretAdd` 直接登记(不加 SetService,
-        不触发身份验证码;设备休眠也可用,实测 10000)。
+        """生成临时密码(App 同链路两步式优先).
 
-        成功后返回 {"name", "key": tempKey, ...} 供结果展示。
+        ① SetService CreateDeviceSnapkey —— **服务端签发** key/keyID
+           (bundle 逆向证实 App 即此链路;设备侧流水因此知晓密钥,
+           state 0→1 可确认, App 端增删语义一致);
+        ② 消息域 SmartLockSecretAdd 固化登记(服务端 keyId/tempKey)。
+
+        设备离线/模型无此服务(10003 等)→ 回落客户端自产
+        keyId/tempKey(记录 state 恒 0, App 端不可删, 到期自动清理;
+        返回值 mode 字段区分两种出身)。
+
+        成功后返回 {"name", "key": tempKey, "mode": server|client, ...}。
         """
         config = config or self.snapkey_config
+        name = str(config.get("name", "Home Assistant"))
+        number = int(config.get("effective_num", -1))
+        effect_days = int(config.get("effective_day", 1))
+
+        # ① 两步式(服务端签发 + 消息域固化, 设备在线才可用)
+        try:
+            created = await self.api.async_smart_lock_create_snapkey(
+                self.device_id,
+                self.product_id,
+                name=name,
+                number=number,
+                effect_days=effect_days,
+            )
+            usage_period = build_usage_period(effect_days)
+            return {
+                "name": config.get("name", ""),
+                "key": created["temp_key"],
+                "key_id": created["key_id"],
+                "mode": "server",
+                "usage_period": usage_period,
+                "raw": created["raw"],
+            }
+        except ImouAPIError as err:
+            _LOGGER.info(
+                "CreateDeviceSnapkey unavailable (%s); falling back to "
+                "client-generated keyId (state stays 0, not App-deletable)",
+                err,
+            )
+
+        # ② 回落: 客户端自产(8 位内 keyId, App 模型范围) + 消息域登记
+        key_id = random.randint(10000000, 99999999)
         temp_key = f"{random.randint(0, 99999999):08d}"
-        usage_period = build_usage_period(
-            str(config.get("weekday_mode", "Every day")),
-            int(config.get("effective_day", 1)),
-        )
+        mode = "client"
+
+        # 生效星期系统自动分配(每天, 掩码 127); 生效窗口由有效天数决定
+        usage_period = build_usage_period(effect_days)
         result = await self.api.async_smart_lock_secret_add(
             self.device_id,
             self.product_id,
             temp_key,
-            name=str(config.get("name", "Home Assistant")),
-            number=int(config.get("effective_num", -1)),
-            effect_days=int(config.get("effective_day", 1)),
+            name=name,
+            number=number,
+            effect_days=effect_days,
             usage_period=usage_period,
+            key_id=key_id,
         )
         return {
             "name": config.get("name", ""),
             "key": temp_key,
+            "key_id": key_id,
+            "mode": mode,
             "usage_period": usage_period,
             "raw": result,
         }

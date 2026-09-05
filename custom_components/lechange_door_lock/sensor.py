@@ -11,13 +11,23 @@ from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_DEVICE_ID, DOMAIN, PROP_LOCK_STATE
+from .const import (
+    CONF_DEVICE_ID,
+    DOMAIN,
+    PROP_LOCK_STATE,
+    PROP_POWER_MODE,
+    WORK_MODE_OPTIONS,
+)
 from .entity import LeChangeEntity
 from .state_utils import (
     derive_door_state,
     derive_lock_state,
+    format_alarm_entries,
+    format_alarm_line,
     format_open_door_time,
+    format_snapkeys_display,
     open_method_label,
+    work_mode_option,
 )
 
 DOOR_STATE_OPTIONS = ["closed", "open", "unknown"]
@@ -36,6 +46,7 @@ async def async_setup_entry(
         LeChangeBatterySensor(coordinator, device_id, "battery_camera"),
         LeChangeDoorStateSensor(coordinator, device_id),
         LeChangePowerModeSensor(coordinator, device_id),
+        LeChangeWorkModeSensor(coordinator, device_id),
         LeChangeWifiSignalSensor(coordinator, device_id),
         LeChangeLastOpenSensor(coordinator, device_id),
         LeChangeLatestOpenDoorTimeSensor(coordinator, device_id),
@@ -122,6 +133,25 @@ class LeChangePowerModeSensor(_BaseLeChangeSensor):
         if isinstance(mode, int) and 0 <= mode <= 2:
             return str(mode)
         return "unknown"
+
+
+class LeChangeWorkModeSensor(_BaseLeChangeSensor):
+    """工作模式: 自动/正常/省电/超级省电 (powerMode)."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = list(WORK_MODE_OPTIONS)
+    _attr_icon = "mdi:power-settings"
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "work_mode")
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data
+        if not data:
+            return None
+        mode = (data.get("props") or {}).get(PROP_POWER_MODE)
+        return work_mode_option(mode)  # 未知/非法 → None(unavailable)
 
 
 class LeChangeWifiSignalSensor(_BaseLeChangeSensor):
@@ -241,7 +271,7 @@ class LeChangeLatestOpenDoorMethodSensor(_BaseLeChangeSensor):
 
 
 class LeChangeSnapkeyCountSensor(_BaseLeChangeSensor):
-    """当前账户下已生成的临时密码分组数量(按钮刷新后更新)."""
+    """临时密码列表(状态值=数量; 属性 snapkeys=字典列表明细, 按钮刷新后更新)."""
 
     _attr_icon = "mdi:key-chain-variant"
 
@@ -253,10 +283,19 @@ class LeChangeSnapkeyCountSensor(_BaseLeChangeSensor):
 
     @property
     def extra_state_attributes(self) -> dict:
-        return {
-            "snapkeys": self.coordinator.snapkey_list[-20:],
-            "last_generated": self.coordinator.last_snapkey_result,
-        }
+        # ★ 字典列表属性(与 latest_alarm 的 alarms 同形): more-info 对
+        #   dict 列表逐块渲染小表, 每条独立、永不截断; 词映射随实例语言
+        #   (i18n.py, HA 不翻译属性内容由集成产出)。最新在前, 上限 20。
+        attrs: dict = {}
+        entries = format_snapkeys_display(
+            self.coordinator.snapkey_list, lang=self.coordinator.language
+        )[:20]
+        if entries:
+            attrs["snapkeys"] = entries
+        # 未生成过临时密码时不输出该键(more-info 显示"未知"很刺眼)
+        if self.coordinator.last_snapkey_result:
+            attrs["last_generated"] = self.coordinator.last_snapkey_result
+        return attrs
 
 
 class LeChangeLatestAlarmSensor(_BaseLeChangeSensor):
@@ -274,10 +313,7 @@ class LeChangeLatestAlarmSensor(_BaseLeChangeSensor):
         alarm = data.get("latest_alarm")
         if not isinstance(alarm, dict):
             return None
-        label = alarm.get("labelType") or ""
-        timer = format_open_door_time(alarm.get("time")) if alarm.get("time") else ""
-        parts = [p for p in (label, timer) if p]
-        return " · ".join(parts) if parts else None
+        return format_alarm_line(alarm, self.coordinator.language) or None
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -287,5 +323,11 @@ class LeChangeLatestAlarmSensor(_BaseLeChangeSensor):
         alarms = data.get("alarms") or []
         return {
             "alarm_count": len(alarms),
-            "alarms": alarms[-10:],
+            # 结构化条目列表({行为/标题/时间} 小 dict): more-info 逐块渲染,
+            # 每条独立成表 —— 字符串列表会被逗号拼接(不换行、截断, 界面实测)。
+            # 顺序: 行为 · 标题 · 时间, 最新在最上; 词映射随实例语言。
+            # 原始数据仍在 coordinator.data.alarms(事件负载不受影响)
+            "alarms": format_alarm_entries(
+                alarms, lang=self.coordinator.language
+            ) or None,
         }

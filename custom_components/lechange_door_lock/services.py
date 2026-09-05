@@ -43,6 +43,7 @@ from .const import (
     SERVICE_WAKE_UP_DEVICE,
 )
 from .coordinator import LeChangeDataUpdateCoordinator
+from .imou_client import ImouAPIError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -472,7 +473,6 @@ async def async_create_snapkey(call: ServiceCall):
         "name": call.data["name"],
         "effective_num": call.data["number"],
         "effective_day": call.data["effect_times"],
-        "weekday_mode": "Every day",
         "begin_time": "00:00:00",
         "end_time": "23:59:59",
     }
@@ -517,18 +517,78 @@ async def async_get_open_door_record(call: ServiceCall):
 
 
 async def async_delete_snapkey(call: ServiceCall):
-    """删除临时密码 (iot.message.SmartLockSecretDelete, 消息域;尽量全字段)."""
+    """删除临时密码 (iot.message.SmartLockSecretDelete, 消息域).
+
+    ★ 必须整条记录回传(真机抓包): 从 snapkey_list 取该 keyId 的条目
+    原样传给 API —— 仅 keyId 服务端返回 10000 但设备侧匹配不上,
+    手机端列表残留无法删除。找不到记录时先刷新再找, 仍无则报错。
+
+    ★ 删除结果核验: 服务端 10000 ≠ 设备侧真删(SmartLockSecretDelete
+    是"请求式", App 对 state=0 待设备确认的密钥也会本地拦截不发包)。
+    删后重新拉列表核验, 仍在 → 发 snapkey_delete_failed 事件并告警日志,
+    把假成功变成可诊断信号(密钥会在到期后由服务端自动清理)。
+    """
     hass, device_id = call.hass, call.data["device_id"]
     coordinator = _get_coordinator(hass, device_id)
     if not coordinator:
         raise HomeAssistantError(f"Device {device_id} not found")
+    key_id = call.data["key_id"]
+
+    async def _find_record():
+        for secret in coordinator.snapkey_list or []:
+            if not isinstance(secret, dict):
+                continue
+            try:
+                if int(str(secret.get("keyId") or "0") or "0") == int(key_id):
+                    return secret
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    record = await _find_record()
+    if record is None:
+        await coordinator.async_request_refresh()
+        record = await _find_record()
+    if record is None:
+        raise HomeAssistantError(
+            f"Temp password {key_id} not in device list; refresh and retry"
+        )
+
     result = await coordinator.api.async_smart_lock_secret_delete(
         coordinator.device_id,
         coordinator.product_id,
-        call.data["key_id"],
+        key_id,
         extra=call.data.get("extra") or {},
+        secret=record,
     )
-    _fire_event(hass, "snapkey_deleted", device_id, key_id=call.data["key_id"], result=result)
+
+    # ---- 结果核验: 重拉列表确认真删(而非仅信 10000) --------------------
+    try:
+        secret = await coordinator.api.async_smart_lock_secret_list(
+            coordinator.device_id, coordinator.product_id, types=3
+        )
+        if isinstance(secret, dict):
+            coordinator.set_snapkey_list(secret.get("secrets") or [])
+    except ImouAPIError:
+        coordinator.set_snapkey_list([])  # 拉取失败 → 下轮轮询自会纠正
+    still_there = await _find_record()
+
+    _fire_event(
+        hass,
+        "snapkey_deleted",
+        device_id,
+        key_id=key_id,
+        result=result,
+        verified=not still_there,
+    )
+    if still_there:
+        _LOGGER.warning(
+            "Temp password %s delete acked by cloud but still in list "
+            "(state=%s, awaiting device confirm); it will be auto-cleaned "
+            "when expired",
+            key_id, record.get("state"),
+        )
+        _fire_event(hass, "snapkey_delete_failed", device_id, key_id=key_id)
     await coordinator.async_request_refresh()
 
 

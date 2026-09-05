@@ -116,7 +116,7 @@
 | 传感器 | 门锁电池电量 / 摄像头电池电量 | `sensor.<name>_battery_lock` 等 |
 | 传感器 | 门状态 / 电量模式 / WiFi 信号 / 最近开门记录 | `sensor.<name>_door_state` 等 |
 | 传感器 | 最近开门时间 / 最近开门方式 | `sensor.<name>_latest_open_door_time` 等 |
-| 传感器 | 临时密码数量（属性含列表与最近生成） | `sensor.<name>_snapkey_count` |
+| 传感器 | 临时密码列表（状态=数量; 属性 snapkeys 含字典列表明细） | `sensor.<name>_snapkey_count` |
 | 二进制传感器 | 在线 / 休眠 / 防拆 / 童锁 | `binary_sensor.<name>_online` 等 |
 | 二进制传感器 | 通道 0 / 1 在线状态 | `binary_sensor.<name>_channel_online` 等 |
 | 按钮 | 远程开门 / **获取门外截图** | `button.<name>_open_door` / `button.<name>_snapshot_door` |
@@ -147,7 +147,7 @@
 | `lechange_door_lock.set_voice_reply` | 设置语音回复 |
 | `lechange_door_lock.create_snapkey` | 生成临时密码（客户端生成,不触发验证码） |
 | `lechange_door_lock.get_snapkey_list` | 临时密码分组列表（云,设备休眠可用） |
-| `lechange_door_lock.delete_snapkey` | 删除临时密码（需 keyId,extra 可传全字段） |
+| `lechange_door_lock.delete_snapkey` | 删除临时密码（需 keyId;自动取整条记录回传+删后核验,state=0 待设备确认可能保留至到期） |
 | `lechange_door_lock.get_open_door_record` | 开门记录 |
 | `lechange_door_lock.doorfront_snapshot` | 门外截图（云端取流抽帧;支持 `channels`/`layout`/`osd` 按次覆盖,结果经事件+可选保存） |
 | `lechange_door_lock.alarm_image` | 告警抓拍图（picUrl 下载+DHAV 解码,`alarm_id` 可选,结果经事件） |
@@ -161,6 +161,7 @@
 - `doorfront_snapshot`（云端门外截图,含 `size`/`url`/`channels`/`layout`）
 - `alarm_image`（告警抓拍图解码,含 `alarm_id`/`time`/`title`/`url`）
 - `voice_reply_list` / `voice_reply_set` / `snapkey_created` / `snapkey_list` / `snapkey_deleted`
+  （`snapkey_deleted` 含 `verified` 字段：删后重拉列表核验该条已消失；未消失时另发 `snapkey_delete_failed`——state=0 待设备确认的密钥可能被服务端保留，设备上线确认或到期后自动清理）
 - `open_door_records` / `set_properties` / `service_result`
 - `open_record`（新开门记录，含 `record` 字段，如用户/方式）
 - `alarm`（新云侧告警，含 `alarm` 字段：labelType/refId/time/message，设备休眠可用）
@@ -222,6 +223,10 @@ CI(`.github/workflows/hacs.yml`)同时运行 [HACS Action](https://github.com/ha
 
 ### 📜 更新日志
 统一更新日志见 [CHANGELOG.md](CHANGELOG.md)(发布时 CI 会自动提取并作为 Release 说明)。
+- **v1.6.5 (2026-09-05)**: 临时密码生成改两步式(App 同链路,服务端签发 key/keyID,设备离线自动回落);
+  keyId 收敛 8 位内 + 删除对齐 App 包并核验结果(修复 App 无法删除);"次数"误读字段修复;
+  告警/临时密码属性结构化 + 属性文本国际化;"最近开门方式/时间"排序与解析修复;
+  告警实体更名"告警信息";工作模式 select;MQTT 重连风暴修复(DISCONNECT 优雅释放)。
 - **v1.6.0 (2026-09-04)**: 会话信任模型落地(sid 持久/token 信任继承来源 sid 登录史/
   10000 无 token 保持会话/多端互踢自愈);**自主续期登录链**(首次绑定后日常运行零人工);
   **GT4 本地滑块验证**(12114 时在 HA 自身端口完成人机验证,容器零端口映射,不再要求

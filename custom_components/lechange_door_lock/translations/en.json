@@ -148,6 +148,15 @@
           "unknown": "Unknown"
         }
       },
+      "work_mode": {
+        "name": "Work mode",
+        "state": {
+          "auto": "Auto",
+          "normal": "Normal",
+          "power_saving": "Power saving",
+          "super_power_saving": "Super power saving"
+        }
+      },
       "wifi_signal": {
         "name": "WiFi signal",
         "state": {
@@ -168,10 +177,10 @@
         "name": "Latest open method"
       },
       "snapkey_count": {
-        "name": "Snapkey count"
+        "name": "Temp password list"
       },
       "latest_alarm": {
-        "name": "Latest alarm"
+        "name": "Alarm info"
       }
     },
     "binary_sensor": {
@@ -217,19 +226,13 @@
       }
     },
     "select": {
-      "snapkey_weekday_mode": {
-        "name": "Snapkey weekdays",
+      "work_mode": {
+        "name": "Work mode",
         "state": {
-          "Every day": "Every day",
-          "Weekdays": "Weekdays",
-          "Weekend": "Weekend",
-          "Monday": "Monday",
-          "Tuesday": "Tuesday",
-          "Wednesday": "Wednesday",
-          "Thursday": "Thursday",
-          "Friday": "Friday",
-          "Saturday": "Saturday",
-          "Sunday": "Sunday"
+          "auto": "Auto",
+          "normal": "Normal",
+          "power_saving": "Power saving",
+          "super_power_saving": "Super power saving"
         }
       },
       "snapshot_channels": {

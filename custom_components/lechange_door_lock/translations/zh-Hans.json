@@ -147,6 +147,15 @@
           "unknown": "未知"
         }
       },
+      "work_mode": {
+        "name": "工作模式",
+        "state": {
+          "auto": "自动模式",
+          "normal": "正常模式",
+          "power_saving": "省电模式",
+          "super_power_saving": "超级省电模式"
+        }
+      },
       "wifi_signal": {
         "name": "WiFi 信号",
         "state": {
@@ -167,10 +176,10 @@
         "name": "最近开门方式"
       },
       "snapkey_count": {
-        "name": "临时密码数量"
+        "name": "临时密码列表"
       },
       "latest_alarm": {
-        "name": "最新告警"
+        "name": "告警信息"
       }
     },
     "binary_sensor": {
@@ -216,19 +225,13 @@
       }
     },
     "select": {
-      "snapkey_weekday_mode": {
-        "name": "临时密码生效星期",
+      "work_mode": {
+        "name": "工作模式",
         "state": {
-          "Every day": "每天",
-          "Weekdays": "工作日",
-          "Weekend": "周末",
-          "Monday": "周一",
-          "Tuesday": "周二",
-          "Wednesday": "周三",
-          "Thursday": "周四",
-          "Friday": "周五",
-          "Saturday": "周六",
-          "Sunday": "周日"
+          "auto": "自动模式",
+          "normal": "正常模式",
+          "power_saving": "省电模式",
+          "super_power_saving": "超级省电模式"
         }
       },
       "snapshot_channels": {

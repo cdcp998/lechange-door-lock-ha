@@ -973,6 +973,28 @@ class ImouClient:
         }
         return await self.async_post("iot.control.SetProperties", payload)
 
+    # ------------------------------------------------------- work mode(工作模式)
+    async def async_get_work_mode(
+        self, device_id: str, product_id: str, channel_id: str = "0"
+    ) -> Optional[int]:
+        """读工作模式 powerMode(0 自动/1 正常/2 省电/3 超级省电), 未知返回 None."""
+        props = await self.async_get_properties(
+            device_id, product_id, channel_id,
+            properties=["powerMode"],
+        )
+        value = props.get("powerMode")
+        return value if isinstance(value, int) else None
+
+    async def async_set_work_mode(
+        self, device_id: str, product_id: str, mode: int, channel_id: str = "0"
+    ) -> dict:
+        """写工作模式 powerMode(enum 值按设备模型 spec 原样透传)."""
+        if not isinstance(mode, int) or not 0 <= mode <= 3:
+            raise ValueError(f"invalid work mode: {mode!r}")
+        return await self.async_set_properties(
+            device_id, product_id, {"powerMode": mode}, channel_id
+        )
+
     # ------------------------------------------------------------- media
     async def async_get_transfer_stream_url(
         self,
@@ -1051,10 +1073,76 @@ class ImouClient:
         return data
 
     # ------------------------------------------- 云消息 API(设备休眠也可用)
-    # 说明:临时密码相关接口均走「消息域」(apiver=V10.2.2, charset=UTF-8),
-    # 且**不使用** iot.control.SetService(CreateDeviceSnapkey)——老接口可能触发
-    # 身份验证码/风控(热更分析:SetService 前置 GetValidCode/CheckValidCode)。
-    # keyId/tempKey 由客户端生成,经 SmartLockSecretAdd 直接登记(实测 10000)。
+    # 说明:临时密码相关接口均走「消息域」(apiver=V10.2.2, charset=UTF-8)。
+    # keyId/tempKey 生成:App 逆向(bundle 4413e853)证实服务端链为两步式 ——
+    # SetService CreateDeviceSnapkey 由**服务端签发** key/keyID(出参,含加密
+    # 变体),消息域 SmartLockSecretAdd 仅固化登记;客户端自产 keyId 的记录
+    # "出身"不同(设备流水无此密钥 → state 恒 0、App 端删除被本地拦截)。
+    # 故集成优先两步式(设备在线),失败回落客户端自产(见 02 §6.4.1/6.3.2)。
+    async def async_smart_lock_create_snapkey(
+        self,
+        device_id: str,
+        product_id: str,
+        *,
+        name: str = "Home Assistant",
+        number: int = -1,
+        effect_days: int = 1,
+        channel_id: str = "0",
+    ) -> dict:
+        """两步式生成临时密码(服务端签发 key/keyID, App 同链路).
+
+        ① iot.control.SetService · CreateDeviceSnapkey(ref 26300):
+           入参 name/number(-1 不限)/effectTimes(天)/effectPeriod(整天);
+           出参 26321 密码明文 / 26322 keyID / 26326-27 创建与失效时间。
+        ② iot.message.SmartLockSecretAdd 固化登记(服务端 keyId/tempKey)。
+
+        返回 {"mode": "server", "key_id": int, "temp_key": str, "raw": ...};
+        出参缺 keyID/key(设备离线 10003/模型无此服务)→ 抛 ImouAPIError,
+        由调用方回落客户端自产路径。
+        """
+        period = [{
+            "26341": 127,  # 周位图: 127=每天(起止时刻全天, 热更同款 ref 键)
+            "26342": "000:00:00",
+            "26343": "023:59:59",
+        }]
+        outputs = await self.async_set_service(
+            device_id,
+            product_id,
+            "CreateDeviceSnapkey",
+            {
+                "name": name,
+                "number": int(number),
+                "effectTimes": int(max(effect_days, 1)),
+                "effectPeriod": period,
+            },
+            channel_id=channel_id,
+        )
+        # decode_outputs 无模型规格时保留原始 ref 键 —— 两种形态都兼容
+        key = outputs.get("key") or outputs.get("26321")
+        key_id = outputs.get("keyID") or outputs.get("26322")
+        if not key or key_id in (None, "", 0):
+            raise ImouAPIError(
+                f"CreateDeviceSnapkey output missing key/keyID: {outputs}"
+            )
+        # ② 消息域固化登记(服务端 keyId/tempKey; 时长窗口按配置本地计算)
+        raw = await self.async_smart_lock_secret_add(
+            device_id,
+            product_id,
+            str(key).zfill(8),
+            name=name,
+            number=int(number),
+            effect_days=int(max(effect_days, 1)),
+            key_id=int(key_id),
+        )
+        return {
+            "mode": "server",
+            "key_id": int(key_id),
+            "temp_key": str(key).zfill(8),
+            "create_time": outputs.get("createTime") or outputs.get("26326"),
+            "expires_time": outputs.get("expiresTime") or outputs.get("26327"),
+            "raw": raw,
+        }
+
     async def async_smart_lock_secret_list(
         self, device_id: str, product_id: str, types: int = 3
     ) -> dict:
@@ -1081,11 +1169,14 @@ class ImouClient:
     ) -> dict:
         """添加临时密码 (iot.message.SmartLockSecretAdd; 消息域 apiver=V10.2.2).
 
-        服务端约束:keyId 随机、tempKey 8 位、createTime/expiredTime 必须真实 epoch 秒、
-        type=3、usagePeriod 周位图(127=整周)。
+        服务端约束(真机抓包 flow_live_20260905_163921 L21 校准):
+        keyId 随机 **8 位**(App 全部 8 位;9 位创建可过但 App/设备侧删除
+        匹配不上 → 列表残留,历史踩坑)、tempKey 8 位、type=3、number=-1
+        (不限次数)、effectTimes=有效天数、createTime/expiredTime 为真实
+        epoch 秒**字符串**(App 形态)、usagePeriod 完整两段。
         """
         now = time.time()
-        key_id = key_id if key_id else random.randint(10000000, 999999999)
+        key_id = key_id if key_id else random.randint(10000000, 99999999)
         payload = {
             "productId": product_id,
             "deviceId": device_id,
@@ -1098,10 +1189,10 @@ class ImouClient:
             "location": "",
             "isHijackAlarm": 0,
             "attribute": 0,
-            "createTime": int(now),
+            "createTime": str(int(now)),    # App 抓包: epoch 秒字符串
             "number": number,
             "effectTimes": effect_days,
-            "expiredTime": int(now) + 86400 * max(effect_days, 1),
+            "expiredTime": str(int(now) + 86400 * max(effect_days, 1)),
             "usagePeriod": usage_period or "127-",
         }
         return await self.async_post_msg("iot.message.SmartLockSecretAdd", payload)
@@ -1112,12 +1203,31 @@ class ImouClient:
         product_id: str,
         key_id: int,
         extra: Optional[dict] = None,
+        secret: Optional[dict] = None,
     ) -> dict:
         """删除临时密码 (iot.message.SmartLockSecretDelete; 消息域).
 
-        删除需尽量全字段(仅 state=1 的条目真正移除)。
+        ★ 删除 payload = App 抓包 L49 的 **精确字段集**:
+        productId/deviceId + number/effectTimes/createTime/name/keyId/
+        usagePeriod/tempKey/state/type/expiredTime(11 业务字段, 类型保持
+        列表形态:keyId/effectTimes/createTime/expiredTime 为字符串)。
+        仅发 keyId → 服务端 10000 但设备侧匹配不上 → 列表残留无法删除。
+
+        secret 传 SmartLockSecretListV2.secrets[] 中该 keyId 的条目;
+        此处只挑 App 字段集组装(丢弃 groupId:null/attribute:null 等
+        列表附加字段, 与 App 包逐字段对齐); 缺失业务字段时从列表其余
+        上下文无从补齐 → 仍按可用字段尽力发送(服务端宽松, 设备侧严格)。
         """
-        payload = {"productId": product_id, "deviceId": device_id, "keyId": key_id}
+        payload: dict = {"productId": product_id, "deviceId": device_id}
+        if secret:
+            payload.update({
+                k: secret[k] for k in (
+                    "number", "effectTimes", "createTime", "name", "keyId",
+                    "usagePeriod", "tempKey", "state", "type", "expiredTime",
+                ) if k in secret
+            })
+        else:
+            payload["keyId"] = key_id
         if extra:
             payload.update(extra)
         return await self.async_post_msg("iot.message.SmartLockSecretDelete", payload)

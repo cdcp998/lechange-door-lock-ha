@@ -315,21 +315,106 @@ class TestMessageDomain:
         assert p["tempKey"] == "12345678"
         assert p["type"] == 3
         assert p["number"] == -1
-        assert p["createTime"] > 0
-        assert p["expiredTime"] > p["createTime"]
+        assert p["effectTimes"] == 1
+        # App 抓包(flow_live_20260905_163921 L21): epoch 秒为字符串
+        assert isinstance(p["createTime"], str) and p["createTime"].isdigit()
+        assert isinstance(p["expiredTime"], str) and p["expiredTime"].isdigit()
+        assert int(p["expiredTime"]) > int(p["createTime"])
         assert p["usagePeriod"].startswith("127-")
         assert p["keyId"] > 0  # 客户端生成
+        assert p["keyId"] <= 99999999  # ★ 8 位内(App 一致; 9 位删除匹配不上)
+
+    async def test_create_snapkey_two_step_server_issued(self):
+        """两步式: SetService(CreateDeviceSnapkey) 服务端签发 → Add 固化.
+
+        bundle 4413e853 逆向: App 的 keyId/tempKey 均取自本服务出参
+        (26321 key/26322 keyID) —— 设备侧流水因此知晓密钥。
+        """
+        session = FakeSession({
+            "iot.manager.QueryModelInfo": lambda: _resp(
+                {"code": 10000, "data": {"modelJson": _model_raw_with_snapkey()}}
+            ),
+            "iot.control.SetService": lambda: _resp({
+                "code": 10000,
+                "data": {"outputData": {
+                    "26321": "82394892",
+                    "26322": 67157501,
+                    "26326": "1788597579",
+                    "26327": "1788683978",
+                }},
+            }),
+            "iot.message.SmartLockSecretAdd": lambda: _resp({"code": 10000, "data": {}}),
+        })
+        created = await self._client(session).async_smart_lock_create_snapkey(
+            "SN", "PID", name="Test", number=-1, effect_days=1,
+        )
+        assert created["mode"] == "server"
+        assert created["key_id"] == 67157501
+        assert created["temp_key"] == "82394892"
+
+        # ① SetService: service=26300, 入参 ref 键(name/number/effectTimes/period)
+        calls = {api: kwargs for api, kwargs in session.calls_full}
+        body = json.loads(calls["iot.control.SetService"]["data"])["data"]
+        assert body["service"] == "26300"
+        assert body["inputData"] == {
+            "26301": "Test", "26303": -1, "26302": 1,
+            "26304": [{"26341": 127, "26342": "000:00:00", "26343": "023:59:59"}],
+        }
+        # ② Add: 使用服务端签发的 keyId/tempKey(非客户端随机)
+        p = json.loads(calls["iot.message.SmartLockSecretAdd"]["data"])["data"]
+        assert p["keyId"] == 67157501
+        assert p["tempKey"] == "82394892"
+
+    async def test_create_snapkey_missing_output_raises(self):
+        """出参缺 key/keyID(设备离线 10003 → outputData 空)→ 抛错供回落."""
+        session = FakeSession({
+            "iot.manager.QueryModelInfo": lambda: _resp(
+                {"code": 10000, "data": {"modelJson": _model_raw_with_snapkey()}}
+            ),
+            "iot.control.SetService": lambda: _resp(
+                {"code": 10003, "desc": "device offline"}
+            ),
+        })
+        with pytest.raises(Exception):
+            await self._client(session).async_smart_lock_create_snapkey("SN", "PID")
 
     async def test_secret_delete_domain_and_payload(self):
+        """删除: 精确字段集回传(App 抓包 L49)—— 仅 keyId 设备侧匹配不上."""
+        session = FakeSession({
+            "iot.message.SmartLockSecretDelete": lambda: _resp({"code": 10000, "data": {}}),
+        })
+        record = {
+            "keyId": "67157501", "tempKey": "82394892", "name": "临时密码",
+            "number": -1, "effectTimes": "1", "state": 0, "type": 3,
+            "createTime": "1788597579", "expiredTime": "1788683978",
+            "usagePeriod": "127-20260905T0000Z-20260906T2359Z",
+            # 列表附加字段 → 不应外发(App 包无此项)
+            "groupId": None, "attribute": None,
+        }
+        await self._client(session).async_smart_lock_secret_delete(
+            "SN", "PID", 67157501, secret=record
+        )
+        api, kwargs = session.calls_full[0]
+        assert kwargs["headers"]["x-pcs-apiver"] == "V10.2.2"
+        body = json.loads(kwargs["data"])
+        sent = body["data"]
+        # deviceId/productId + 精确 11 业务字段(类型保持列表形态)
+        assert sent["deviceId"] == "SN" and sent["productId"] == "PID"
+        for k in ("number", "effectTimes", "createTime", "name", "keyId",
+                  "usagePeriod", "tempKey", "state", "type", "expiredTime"):
+            assert sent[k] == record[k], k
+        # 列表附加字段不外发(与 App 包逐字段对齐)
+        assert "groupId" not in sent and "attribute" not in sent
+
+    async def test_secret_delete_fallback_keyid_only(self):
+        """未传 secret(退化路径): payload 至少含 keyId(不保证设备侧成功)."""
         session = FakeSession({
             "iot.message.SmartLockSecretDelete": lambda: _resp({"code": 10000, "data": {}}),
         })
         await self._client(session).async_smart_lock_secret_delete(
             "SN", "PID", 67330355, extra={"type": 3, "name": "x"}
         )
-        api, kwargs = session.calls_full[0]
-        assert kwargs["headers"]["x-pcs-apiver"] == "V10.2.2"
-        body = json.loads(kwargs["data"])
+        body = json.loads(session.calls_full[0][1]["data"])
         assert body["data"]["keyId"] == 67330355
         assert body["data"]["name"] == "x"
 
@@ -470,6 +555,43 @@ def _model_raw() -> dict:
              "outputData": []},
         ],
     }
+
+
+def _model_raw_with_snapkey() -> dict:
+    """带 CreateDeviceSnapkey(26300)的模型变体(两步式生成测试用)."""
+    model = _model_raw()
+    model["services"].append({
+        "identifier": "CreateDeviceSnapkey", "ref": "26300",
+        "name": "生成临时密码",
+        "inputData": [
+            {"identifier": "name", "ref": "26301",
+             "dataType": {"type": "text", "specs": {}}},
+            {"identifier": "effectTimes", "ref": "26302",
+             "dataType": {"type": "int", "specs": {}}},
+            {"identifier": "number", "ref": "26303",
+             "dataType": {"type": "int", "specs": {}}},
+            {"identifier": "effectPeriod", "ref": "26304",
+             "dataType": {"type": "array", "specs": {
+                 "type": "struct", "specs": [
+                     {"identifier": "week", "ref": "26341",
+                      "dataType": {"type": "int", "specs": {}}},
+                     {"identifier": "begin", "ref": "26342",
+                      "dataType": {"type": "text", "specs": {}}},
+                     {"identifier": "end", "ref": "26343",
+                      "dataType": {"type": "text", "specs": {}}}]}}},
+        ],
+        "outputData": [
+            {"identifier": "key", "ref": "26321",
+             "dataType": {"type": "text", "specs": {}}},
+            {"identifier": "keyID", "ref": "26322",
+             "dataType": {"type": "int", "specs": {}}},
+            {"identifier": "createTime", "ref": "26326",
+             "dataType": {"type": "text", "specs": {}}},
+            {"identifier": "expiresTime", "ref": "26327",
+             "dataType": {"type": "text", "specs": {}}},
+        ],
+    })
+    return model
 
 
 class TestRefEncoding:

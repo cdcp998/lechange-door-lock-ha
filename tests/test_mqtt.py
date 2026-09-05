@@ -163,3 +163,123 @@ async def test_on_event_property_push(monkeypatch):
                            on_event=on_event, certs_dir="")
     await mgr._on_message("iot_response", {"params": {"data": {"properties": {}}}})
     assert received and received[0]["topic"] == "iot_response"
+
+
+# ------------------------------------------------- graceful close (DISCONNECT)
+class _FakeWriter:
+    """记录 write 字节的最小 writer 桩(async_close 语义所需)."""
+
+    def __init__(self):
+        self.written = bytearray()
+        self.closed = False
+
+    def write(self, data):
+        self.written.extend(data)
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    async def wait_closed(self):
+        pass
+
+
+def _client_with_writer(session_up: bool) -> mc.MqttClient:
+    client = mc.MqttClient("cid", "u", "p", "host", 8883)
+    client._session_up = session_up
+    client._writer = _FakeWriter()
+    return client
+
+
+@pytest.mark.asyncio
+async def test_close_sends_disconnect_after_connack():
+    """会话已建立 → close 先发 DISCONNECT 再关 TCP.
+
+    否则服务端视为异常掉线, 会话滞留至 keepalive 宽限超时, 期间同
+    clientId 重连被拒 → "0 bytes read" 退避刷屏(线上 v1.6.2 观测)。
+    """
+    client = _client_with_writer(session_up=True)
+    writer = client._writer
+    await client.async_close()
+    assert bytes(writer.written) == b"\xe0\x00"  # DISCONNECT 先于 TCP 关闭
+    assert writer.closed
+    assert client._writer is None and client._session_up is False  # 状态清理
+
+
+@pytest.mark.asyncio
+async def test_close_sends_disconnect_packet_bytes():
+    """DISCONNECT 包字节确实写入: 固定 0xE0 0x00(2 字节)."""
+    client = _client_with_writer(session_up=True)
+    writer = client._writer
+    await client.async_close()
+    assert bytes(writer.written) == b"\xe0\x00"
+
+
+@pytest.mark.asyncio
+async def test_close_without_session_sends_no_disconnect():
+    """连接从未成功(CONNACK 前被服务端断开) → 无会话可释放, 不发 DISCONNECT."""
+    client = _client_with_writer(session_up=False)
+    writer = client._writer
+    await client.async_close()
+    assert writer.written == bytearray()  # 只关 TCP, 不写 DISCONNECT
+
+
+@pytest.mark.asyncio
+async def test_read_loop_server_disconnect_clears_session(monkeypatch):
+    """服务端主动 DISCONNECT → 会话状态清除, close 不再补发 DISCONNECT."""
+    client = _client_with_writer(session_up=True)
+    writer = client._writer
+
+    async def fake_read_packet(_reader):
+        return (mc.PKT_DISCONNECT, b"")
+
+    monkeypatch.setattr(mc, "_read_packet", fake_read_packet)
+    client._connected = True
+    client._reader = object()  # 非 None 即可进入循环
+    await asyncio.wait_for(client._read_loop(), timeout=2)
+    assert client._session_up is False
+    assert client.connected is False
+    await client.async_close()
+    assert writer.written == bytearray()  # 服务端已回收, 无需补发
+
+
+# ------------------------------------------------- failed connect: no leak
+class _LeakProbeClient:
+    """模拟 CONNACK 前 EOF: connect 抛异常, TLS 已建立(半开)."""
+
+    instances: list = []
+
+    def __init__(self, *args, **kwargs):
+        self.closed = False
+        self.close_calls = 0
+        _LeakProbeClient.instances.append(self)
+
+    async def async_connect(self):
+        raise ConnectionError("MQTT CONNACK failed rc=-1")  # 0 bytes read 场景
+
+    async def async_close(self):
+        self.close_calls += 1
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_ensure_connected_failure_closes_half_open_client(monkeypatch):
+    """连接失败路径必须 close 半开客户端, 否则 socket/服务端会话泄漏."""
+    monkeypatch.setattr(mqtt, "MqttClient", _LeakProbeClient)
+    api = _FakeApi()
+
+    async def cloud_ctrl(a, p):
+        return {"code": 10000}
+
+    mgr = mqtt.MqttManager(api, "DEV", "PROD", cloud_ctrl,
+                           on_event=_noop_event, certs_dir="")
+    with pytest.raises(ConnectionError):
+        await mgr.async_ensure_connected()
+    assert len(_LeakProbeClient.instances) == 1
+    assert _LeakProbeClient.instances[0].close_calls == 1  # ★ 不泄漏
+    # 凭据缓存已作废(原有行为保持)
+    assert mgr._last_creds == {} and mgr._creds_at == 0.0
+    # 失败的客户端不会被记为当前连接
+    assert mgr._mqtt is None and mgr.connected is False

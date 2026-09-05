@@ -163,6 +163,7 @@ NEED_CREDIT_CODES = {12112}
 # --- model property identifiers ---------------------------------------------
 PROP_LOCK_STATE = "doorLockState"        # 0 关 / 1 开 (门物理状态)
 PROP_POWER_STATE = "powerState"          # 0 正常 / 1 省电 / 2 超级省电
+PROP_POWER_MODE = "powerMode"            # 工作模式: 0 自动 / 1 正常 / 2 省电 / 3 超级省电
 PROP_TAMPER = "tamper"
 PROP_CHILD_LOCK = "child_lock"
 PROP_WIFI_DOOR_LOCK = "wifiDoorLock"     # struct {SSID, status, intensity...}
@@ -174,6 +175,15 @@ PROP_LOCK_NOTE_REPORT = "lockNoteReport"    # array: 开门记录
 PROP_CHANNEL_NAMES = "ipc_devChnName"       # array: 摄像头通道名
 PROP_CALL_TRANSFER = "sdl_callTransferSwitch"  # 0 关 / 1 开
 
+# 工作模式(powerMode)枚举 → select/sensor 选项键
+# ★ 枚举值按 powerState(0 正常/1 省电/2 超级省电)的既有约定顺延:
+#   自动=0 插入首位; 真机抓包如有出入, 只需调整本表
+WORK_MODE_OPTIONS = ("auto", "normal", "power_saving", "super_power_saving")
+WORK_MODE_TO_VALUE = {
+    "auto": 0, "normal": 1, "power_saving": 2, "super_power_saving": 3,
+}
+VALUE_TO_WORK_MODE = {v: k for k, v in WORK_MODE_TO_VALUE.items()}
+
 # --- device list status ----------------------------------------------------
 STATUS_ONLINE = "online"
 STATUS_SLEEP = "sleep"
@@ -183,6 +193,13 @@ LOCK_STATE_CLOSED = "beClosed"
 LOCK_STATE_OPENED = "beOpened"
 LOCK_STATE_AJAR = "beAjar"
 LOCK_STATE_OPENED_KEYS = {LOCK_STATE_OPENED, LOCK_STATE_AJAR}
+
+# 云侧告警 labelType 行为映射(抓包 API/capture 20260905: R10-Max 的
+# 开门/出门事件统一为 accessAlarm, 见 UnlockRecordWithDate 页);
+# 其余类型码捕获后继续补充, 未收录的原样透传(数字码仍被展示层抑制)
+ALARM_LABEL_TYPE_NAMES = {
+    "accessAlarm": "开门/出门事件",
+}
 
 # 开门记录 keyType 枚举 → 中文
 KEY_TYPE_NAMES = {
@@ -194,19 +211,11 @@ KEY_TYPE_NAMES = {
     "21": "管理员密码", "22": "管理员指纹", "23": "管理员密码+指纹",
 }
 
-# 星期(select 选项) ↔ 设备模型 period 枚举(0=周日 .. 6=周六)
-WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
-WEEKDAY_TO_PERIOD = {
-    "Sunday": 0, "Monday": 1, "Tuesday": 2, "Wednesday": 3,
-    "Thursday": 4, "Friday": 5, "Saturday": 6,
-}
-SNAPKEY_WEEKDAY_OPTIONS = ("Every day", "Weekdays", "Weekend") + WEEKDAYS
-
 DEFAULT_SNAPKEY_CONFIG = {
     "name": "Home Assistant",
     "effective_num": -1,   # 使用次数(-1 不限)
     "effective_day": 1,    # 有效天数
     "begin_time": "00:00:00",
     "end_time": "23:59:59",
-    "weekday_mode": "Every day",
+    # weekday_mode 已移除: 系统自动按每天(掩码 127)分配, 不再提供配置项
 }
