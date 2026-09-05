@@ -320,7 +320,12 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         ]
         if missing:
             now = time.monotonic()
-            if now - getattr(self, "_last_fill_attempt", 0.0) >= 60.0:
+            # 首次尝试必须执行: 新分配的 CI runner / 刚启动的容器
+            # monotonic() 可能 < 60s, 0.0 初值不能当"很久以前"
+            if (
+                not hasattr(self, "_last_fill_attempt")
+                or now - self._last_fill_attempt >= 60.0
+            ):
                 self._last_fill_attempt = now
                 filled: list[str] = []
                 # ① GetDeviceDetailInfo 云端属性缓存(休眠可读)

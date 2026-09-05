@@ -1433,3 +1433,122 @@ async def test_send_credit_code_delegates_granting_usage():
     assert payload["type"] == "phone"
     assert payload["isEncrypt"] is True
     assert payload["account"] == "ENC"
+
+@pytest.mark.asyncio
+async def test_coordinator_fill_attempt_runs_on_fresh_monotonic_clock():
+    """降级链节流: 新启动环境 monotonic() < 60s 也必须执行首次填充.
+
+    回归: _last_fill_attempt 初值 0.0 被 getattr 兜底, 新分配的 CI
+    runner / 刚启动的容器 monotonic 从启动起算 < 60s, now - 0.0 < 60
+    → 首次轮询跳过整个降级链 → props 为空(KeyError 级, CI 独有)。
+    """
+    import json as _j
+    import importlib
+
+    ha = sys.modules["homeassistant"]
+    const = types.ModuleType("homeassistant.const")
+    const.EVENT_HOMEASSISTANT_STARTED = "homeassistant_started"
+    const.PERCENTAGE = "%"
+    sys.modules["homeassistant.const"] = const
+    ha.const = const
+    helpers = sys.modules["homeassistant.helpers"]
+    for name, attrs in (
+        ("aiohttp_client", {"async_get_clientsession": lambda hass: MagicMock()}),
+        ("event", {"async_track_time_interval": lambda *a, **k: MagicMock()}),
+    ):
+        if not hasattr(helpers, name):
+            mod = types.ModuleType(f"homeassistant.helpers.{name}")
+            for aname, aval in attrs.items():
+                setattr(mod, aname, aval)
+            setattr(helpers, name, mod)
+            sys.modules[f"homeassistant.helpers.{name}"] = mod
+    dr_mod = sys.modules.get("homeassistant.helpers.device_registry")
+    if dr_mod is None or not hasattr(dr_mod, "async_get"):
+        dr_mod = types.ModuleType("homeassistant.helpers.device_registry")
+        dr_mod.async_get = lambda hass: MagicMock()
+        sys.modules["homeassistant.helpers.device_registry"] = dr_mod
+        helpers.device_registry = dr_mod
+    uc = types.ModuleType("homeassistant.helpers.update_coordinator")
+
+    class _CoordinatorEntity:
+        def __init__(self, coordinator):
+            self.coordinator = coordinator
+
+    class _DataUpdateCoordinator:
+        def __init__(self, hass, *a, **k):
+            self.hass = hass
+            self.data = None
+            self.last_update_success = True
+
+        async def async_config_entry_first_refresh(self):
+            pass
+
+        async def async_refresh(self):
+            pass
+
+        async def async_request_refresh(self):
+            pass
+
+        def async_set_updated_data(self, data):
+            self.data = data
+
+    uc.CoordinatorEntity = _CoordinatorEntity
+    uc.DataUpdateCoordinator = _DataUpdateCoordinator
+    uc.UpdateFailed = type("UpdateFailed", (Exception,), {})
+    sys.modules["homeassistant.helpers.update_coordinator"] = uc
+    helpers.update_coordinator = uc
+
+    from lechange_door_lock import coordinator as coord_mod
+    coord_mod = importlib.reload(coord_mod)
+    coord = coord_mod.LeChangeDataUpdateCoordinator.__new__(
+        coord_mod.LeChangeDataUpdateCoordinator
+    )
+    coord.hass = MagicMock()
+    coord.entry = MagicMock()
+    coord.entry.entry_id = "E1"
+    coord.entry.data = {}
+    coord.device_id = "DEV1"
+    coord.product_id = "P1"
+    coord.channel_id = "0"
+    coord.data = None
+    coord._seen_lock_notes = set()
+    coord._seen_alarm_ids = set()
+    coord._alarm_seen_initialized = True
+
+    # ★ 模拟新分配 runner: monotonic 小值(启动 < 60s)
+    detail_props = {
+        "106000": {"106001": "NetWei", "106003": 2},
+        "106200": [{"106203": 55, "106202": 0, "106201": 1}],
+    }
+    decoded = {
+        "wifiDoorLock": {"SSID": "NetWei", "status": 2},
+        "devicePowerLock": [{"elecPercent": 55, "type": 0, "state": 1}],
+    }
+
+    api = MagicMock()
+    api.terminal_id = "TID"
+    api.async_get_device_info = AsyncMock(return_value={
+        "deviceId": "DEV1", "status": "sleep", "lockState": "beClosed",
+        "channels": [], "properties_map": "",
+    })
+    api.async_get_properties = AsyncMock(
+        side_effect=coord_mod.ImouAPIError(10003, "sleeping")
+    )
+    api.async_get_device_detail_info = AsyncMock(
+        return_value={"properties": detail_props}
+    )
+    api.async_get_devices = AsyncMock(return_value=[])
+    api.async_get_alarm_messages = AsyncMock(return_value={"alarms": []})
+    api.async_smart_lock_secret_list = AsyncMock(return_value={"secrets": []})
+    model = MagicMock()
+    model.decode_properties = MagicMock(return_value=decoded)
+    api.async_get_model = AsyncMock(return_value=model)
+    coord.api = api
+
+    with patch.object(coord_mod.time, "monotonic", return_value=30.0):
+        data = await coord._async_update_data()
+
+    # ★ monotonic=30s(新启动)也必须走降级链填充 props
+    assert data["props"]["wifiDoorLock"]["SSID"] == "NetWei"
+    assert data["battery_camera"] == 55
+
