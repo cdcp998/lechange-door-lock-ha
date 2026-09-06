@@ -10,6 +10,34 @@
 
 ---
 
+## [未发布]
+
+### 修复 — 童锁(彻底)
+- **童锁真实载体 = `sdl_inOpenDoorModel`(171700, 2=童锁/1=普通)**:`child_lock`
+  (120000) 已过期且语义与 171700 相反/混乱(双源恒反) — 现只认 171700 单一真源。
+- **改官方链路(逆向 main.jsbundle 铁证)**:写属性 = `iot.control.SetProperties
+  {properties:{171700:1|2}}` — **不唤醒/不取流/不 await 在线**,允许休眠设备直接
+  写("下次唤醒生效")。移除此前自造的 RTS 采流"真唤醒"(耗电/残留/等待源)。
+- **状态即时刷新**:写入后同步 props + `async_set_updated_data` 广播 — 不再等
+  30s 轮询("点击后 1 分钟才变"根因);props 改合并(轮询缺键不覆盖丢失,防闪跳)。
+- 传感器去 `device_class LOCK`(on/off 同开关, 不再"已锁定/已解锁"相反)。
+
+### 修复 — 审查清单(稳健性)
+- **AUTH_FAIL 重登串行化**(`_login_lock`):并发 12002 双 GetToken→10001 竞态。
+- **卸载顺序**先卸平台再拆协调器:卸载失败不僵死(原协调器先拆)。
+- **事件去重键加 `sort_keys`**:字段顺序抖动不重复触发事件。
+- **`send_sms_code`/`authorize_terminal` 按 account 匹配协调器**:多账号不拿错会话。
+- **api_host `removesuffix(:443)`**(端口 4432 网关不被替换)+ **nonce 换 `secrets`**(CSPRNG)。
+- **dav_codec SOF 起点 `ENC_START+ENC_LEN`**:密文伪命中拼坏图(0.4%)。
+- **rtsv `wait_closed` 加超时**:asyncio 连接残留("重启 HA 才好"的可能源)。
+- **CreateDeviceSnapkey 缺 key/keyID raise 放 desc 位** — `ImouAPIError(code:int)` 契约。
+
+### 其他
+- 临时密码两步式生成/删除对齐 App 包(v1.6.5 并入)。
+- 竞态回归测试 `test_child_lock_race`(resolve 171700 + props 合并不回弹)。
+
+---
+
 ## [v1.6.5] - 2026-09-05
 
 ### 变更
