@@ -234,13 +234,14 @@ async def async_wake_up_device(call: ServiceCall):
     if not coordinator:
         raise HomeAssistantError(f"Device {device_id} not found")
     errors = []
-    for prop in ("Dormant", "sleepStatus"):
-        try:
-            await coordinator.api.async_set_properties(
-                coordinator.device_id, coordinator.product_id, {prop: False}
-            )
-        except Exception as err:  # noqa: BLE001
-            errors.append(str(err))
+    # ★ 无需唤醒操作(逆向报告 §5.2/用户实测): 设备休眠由轮询降级链自动拉取
+    #   (GetProperties 10003 → GetDeviceDetailInfo/BasicInfoGetV2 propertiesMap
+    #   缓存)。旧 SetProperties(Dormant/sleepStatus=False) 实测 40999 设备拒绝,
+    #   已废弃。本服务语义 = 立即触发一次数据拉取(拉最新)。
+    try:
+        await coordinator.async_request_refresh()
+    except Exception as err:  # noqa: BLE001
+        errors.append(str(err))
     _fire_event(hass, "wake_up", device_id, errors=errors)
 
 
@@ -249,8 +250,8 @@ async def async_reload_data(call: ServiceCall):
 
     全量拉取: 设备快照 + IoT 属性 + 云侧告警 + 型号/固件标定更新到
     设备注册表。会话失效时 EVERGREEN 自主续期链自动补会话。
-    wake=True: 先尝试唤醒(休眠设备 GetProperties 10003 时数据拉不全,
-    唤醒窗口内属性才有实时值)。
+    wake=True: 直接触发一次数据拉取(旧 SetProperties 写入实测 40999
+    被设备拒绝已废弃; 休眠数据由降级链拉缓存)。
     """
     hass, device_id = call.hass, call.data["device_id"]
     coordinator = _get_coordinator(hass, device_id)
@@ -258,13 +259,11 @@ async def async_reload_data(call: ServiceCall):
         raise HomeAssistantError(f"Device {device_id} not found")
     wake = bool(call.data.get("wake", False))
     if wake:
-        for prop in ("Dormant", "sleepStatus"):
-            try:
-                await coordinator.api.async_set_properties(
-                    coordinator.device_id, coordinator.product_id, {prop: False}
-                )
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Wake (%s) before reload failed: %s", prop, err)
+        try:
+            await coordinator.async_request_refresh()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Fast pull before reload failed: %s", err)
+
         import asyncio as _aio
 
         await _aio.sleep(8)   # 唤醒窗口(取流唤醒 ~5s 上线)
@@ -516,6 +515,17 @@ async def async_get_open_door_record(call: ServiceCall):
     _fire_event(hass, "open_door_records", device_id, records=records)
 
 
+async def _safe_key_id(key_id) -> int:
+    """设备域 ref 211443 定义 int(-1~999999); 非数字/超范围 → -1(实测设备域接受 -1+name 匹配删除)."""
+    try:
+        v = int(str(key_id).strip())
+    except (TypeError, ValueError):
+        return -1
+    if v < -1 or v > 999999:
+        return -1
+    return v
+
+
 async def async_delete_snapkey(call: ServiceCall):
     """删除临时密码 (iot.message.SmartLockSecretDelete, 消息域).
 
@@ -547,20 +557,56 @@ async def async_delete_snapkey(call: ServiceCall):
 
     record = await _find_record()
     if record is None:
-        await coordinator.async_request_refresh()
+        # ★ 直接拉一次列表(消息域 ListV2, 设备休眠可用) —— 不依赖主轮询
+        #   (async_request_refresh 只刷快照/属性, 不更新 snapkey_list)
+        try:
+            fresh = await coordinator.api.async_smart_lock_secret_list(
+                coordinator.device_id, coordinator.product_id, types=3
+            )
+            if isinstance(fresh, dict):
+                coordinator.set_snapkey_list(fresh.get("secrets") or [])
+        except ImouAPIError:
+            pass
         record = await _find_record()
     if record is None:
         raise HomeAssistantError(
             f"Temp password {key_id} not in device list; refresh and retry"
         )
 
-    result = await coordinator.api.async_smart_lock_secret_delete(
-        coordinator.device_id,
-        coordinator.product_id,
-        key_id,
-        extra=call.data.get("extra") or {},
-        secret=record,
-    )
+    # ★ 设备域删除优先(App 删除链第一步, 2026-09-06 实测铁证):
+    #   SetService sdl_standardDelKey(211400) 按设备数据库删 —— 绕过消息域
+    #   对 state=0 草稿/非数字 keyId 的 12100/500; 对畸形记录(keyId="abc")
+    #   实测 10000 + ListV2 立即移除。消息域 deleteKey 兜底(兼容旧行为)。
+    try:
+        dev_result = await coordinator.api.async_sdl_standard_del_key(
+            coordinator.device_id,
+            coordinator.product_id,
+            [{
+                "type": record.get("type", 3),
+                "name": record.get("name", ""),
+                "keyID": _safe_key_id(record.get("keyId")),
+                "groupName": record.get("groupName") or "",
+                "groupID": record.get("groupID") or "",
+            }],
+        )
+        _LOGGER.info(
+            "Device-domain SetService sdl_standardDelKey delete %s: %s",
+            key_id, dev_result,
+        )
+        result = {"device_domain": dev_result}
+    except ImouAPIError as dev_err:
+        _LOGGER.warning(
+            "Device-domain SetService delete failed (%s); falling back to "
+            "message-domain SmartLockSecretDelete",
+            dev_err,
+        )
+        result = await coordinator.api.async_smart_lock_secret_delete(
+            coordinator.device_id,
+            coordinator.product_id,
+            key_id,
+            extra=call.data.get("extra") or {},
+            secret=record,
+        )
 
     # ---- 结果核验: 重拉列表确认真删(而非仅信 10000) --------------------
     try:

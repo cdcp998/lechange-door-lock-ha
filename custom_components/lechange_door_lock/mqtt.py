@@ -1,10 +1,14 @@
 """MQTT realtime channel facade for the LeChange integration.
 
+★ MQTT 定位(2026-09 真机实证): **只读推送实验通道, 默认关闭**。
+  - App 业务 21 抓包全走 HTTP, MQTT 零使用;
+  - MQTT 连接需私有 CA 且 CONNACK 前服务端零字节断开(凭证正确仍被拒);
+  - 因此**控制/设置/生成一律走云 API(HTTP)**, MQTT 仅保留推送订阅实验
+    (默认关), 数据由轮询兜底, 功能不降级。
+
 - 连接管理: 后台任务持有 MqttClient, 断线自动重连(指数退避)
 - 事件处理: iot_response/iot_request/android_iot_property 推送 → coordinator 回调
-- 控制: MQTT iot_request 优先 → 失败/未连接 → 云 API 兜底(iot.control.SetService/
-  SetProperties —— 由调用方注入 cloud 方法)
-- 云 API 兜底原则: MQTT 只是实时加速通道; 断连时功能不降级(轮询/云控制照常)。
+- 控制: 统一走云 API(coordinator.async_iot_control → imou_client.async_post)
 """
 
 from __future__ import annotations
@@ -173,24 +177,13 @@ class MqttManager:
 
     # ---------------------------------------------------------------- control
     async def async_request(self, api: str, params: dict, timeout: float = 10.0) -> dict:
-        """控制: MQTT 优先; 未连接/超时 → 云 API 兜底(抛 ImouAPIError 由调用方处理).
+        """控制/设置请求 —— **一律走云 API**(MQTT 写通道已废弃).
 
-        返回业务响应 dict; 云兜底时会标记 {"via": "cloud"}。
+        ★ MQTT 写通道真机实证不可用(App 全走 HTTP, MQTT 连接 CONNACK 前
+          被服务端拒绝, 需私有 CA) —— 本方法仅保留签名兼容(账号 facade/
+          历史调用), 内部直接走 cloud_ctrl(HTTP 云 API); timeout 仅签名
+          兼容, 云 API 自带超时。
         """
-        if self.connected and self._mqtt:
-            try:
-                resp = await self._mqtt.async_request(api, params, timeout=timeout)
-                if resp.get("statusCode") == 200:
-                    inner = resp.get("params") or {}
-                    if inner.get("code") == 10000:
-                        return inner | {"via": "mqtt"}
-                    raise ImouAPIError(
-                        inner.get("code", -1), str(inner.get("desc") or "mqtt failed")
-                    )
-                raise ImouAPIError(int(resp.get("statusCode", -1)), "mqtt http status")
-            except (ConnectionError, asyncio.TimeoutError) as err:
-                _LOGGER.debug("MQTT control failed (%s); falling back to cloud", err)
-        # 云 API 兜底
         data = await self.cloud_ctrl(api, params)
         if isinstance(data, dict):
             data = dict(data)

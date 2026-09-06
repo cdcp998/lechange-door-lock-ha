@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
+import secrets
 import time
 import uuid
 from datetime import timedelta
@@ -581,7 +581,25 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         number = int(config.get("effective_num", -1))
         effect_days = int(config.get("effective_day", 1))
 
-        # ① 两步式(服务端签发 + 消息域固化, 设备在线才可用)
+        # ★ 生成前先唤醒设备(取流 URL 自带唤醒语义, 与 SetProperties 不同):
+        #   CreateDeviceSnapkey 是设备面命令 —— 设备在线才成功(step① → 服务端
+        #   签发 key/keyID → step② Add state=1, App 可删/认可); 设备休眠时 step①
+        #   → 10003 → 回落 state=0 草稿(App 删除返回 10000 但列表不移除)。
+        #   ensure_awake 尽力而为(唤醒失败不阻断, 回落仍可登记)。
+        if not await self.ensure_awake(max_wait=10.0):
+            _LOGGER.info(
+                "Device %s still sleeping; snapkey will be state=0 draft "
+                "(effective once device online; App-delete deferred)",
+                self.device_id,
+            )
+
+        # ★ 两步式优先(App 同款, 逆向 main.jsbundle addTempKeyToSass @11739016
+        #   铁证: setService(CreateDeviceSnapkey).then(keyAdd)): ①SetService
+        #   CreateDeviceSnapkey(服务端签发 key/keyID, **设备知晓 → 服务端认可**)
+        #   → ②SmartLockSecretAdd 登记(带完整 usagePeriod)。
+        #   ★ "入口=认可": 一步式(客户端自产 keyId)设备数据库不知晓 → state=0
+        #   未认可, 设备同步时被服务端清理; 两步式(服务端签发)设备知晓 →
+        #   state=1 认可, 不被清理(用户实测 HA→App 生成序列证实)。
         try:
             created = await self.api.async_smart_lock_create_snapkey(
                 self.device_id,
@@ -602,13 +620,14 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         except ImouAPIError as err:
             _LOGGER.info(
                 "CreateDeviceSnapkey unavailable (%s); falling back to "
-                "client-generated keyId (state stays 0, not App-deletable)",
+                "client-generated keyId (state=0 draft; device online → state=1)",
                 err,
             )
 
         # ② 回落: 客户端自产(8 位内 keyId, App 模型范围) + 消息域登记
-        key_id = random.randint(10000000, 99999999)
-        temp_key = f"{random.randint(0, 99999999):08d}"
+        # ★ 密码类值必须用 secrets(加密安全 RNG), random(MT) 可预测
+        key_id = secrets.randbelow(2000000) + 67000000  # App 段 [67000000, 68999999]
+        temp_key = f"{secrets.randbelow(100000000):08d}"
         mode = "client"
 
         # 生效星期系统自动分配(每天, 掩码 127); 生效窗口由有效天数决定
@@ -685,22 +704,19 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
 
     # ------------------------------------------------------------------ MQTT
     async def async_iot_control(self, api: str, payload: dict) -> dict:
-        """IoT 控制统一入口: MQTT 优先 → 云 API 兜底.
+        """IoT 控制/设置统一入口 —— **一律走云 API(HTTP)**.
 
-        payload 需已 ref 编码(调用方用 model 编码); 返回 dict, 带 "via" 标记。
-        MQTT 未连接/超时 → 云 API(imou_client.async_post); 业务错误直接抛异常。
+        ★ MQTT 写通道已废弃(真机 2026-09 实证): App 业务 21 抓包全走
+          HTTP, MQTT 零使用; MQTT 连接需私有 CA 且 CONNACK 前被服务端
+          零字节断开(实验性质通道, 凭证正确仍被拒)。设置/控制/生成
+          类操作统一走 imou_client.async_post(HTTP 云 API)。
+        返回 dict, 带 "via": "cloud" 标记。
         """
-        try:
-            return await self.mqtt.async_request(api, payload)
-        except ImouAPIError:
-            raise  # MQTT 业务错误(设备离线等): 不兜底, 交由调用方处理
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("MQTT control failed (%s); falling back to cloud", err)
-            data = await self.api.async_post(api, payload)
-            if isinstance(data, dict):
-                data = dict(data)
-                data["via"] = "cloud"
-            return data
+        data = await self.api.async_post(api, payload)
+        if isinstance(data, dict):
+            data = dict(data)
+            data["via"] = "cloud"
+        return data
 
     async def _mqtt_cloud_ctrl(self, api: str, params: dict) -> dict:
         """MQTT 控制失败时的云 API 兜底(SetService/SetProperties 统一入口)."""

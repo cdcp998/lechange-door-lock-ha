@@ -296,8 +296,7 @@ async def test_device_step_password_login_shape_creates_entry():
     flow = _make_flow(_real_login_shape())
     result = await flow.async_step_device({
         CONF_DEVICE_ID: "DEV1",
-        CONF_SECURITY_CODE: "ABCD1234",
-        CONF_DEVICE_PASSWORD: "",
+        CONF_DEVICE_PASSWORD: "ABCD1234",  # 安全码输入框已移除: 设备密码兼作安全码回退
     })
     assert result["type"] == "create_entry", result
     data = result["data"]
@@ -314,7 +313,8 @@ async def test_device_step_password_login_shape_creates_entry():
     assert data[CONF_MODEL_NAME] == "DL01S"
     assert data[CONF_FIRMWARE_VERSION] == "1.0.0"
     assert data[CONF_LOCK_STATE] == "1"
-    assert data[CONF_DEVICE_PASSWORD] == "ABCD1234"  # 留空回退安全码
+    assert data[CONF_DEVICE_PASSWORD] == "ABCD1234"  # 显式设备密码
+    assert data[CONF_SECURITY_CODE] == "ABCD1234"  # 安全码已移除输入框 → 设备密码回退
 
 
 @pytest.mark.asyncio
@@ -325,12 +325,12 @@ async def test_device_step_sms_login_shape_creates_entry():
     flow = _make_flow(login)
     result = await flow.async_step_device({
         CONF_DEVICE_ID: "DEV1",
-        CONF_SECURITY_CODE: "ABCD1234",
-        CONF_DEVICE_PASSWORD: "MYPW",
+        CONF_DEVICE_PASSWORD: "MYPW",  # 安全码输入框已移除
     })
     assert result["type"] == "create_entry"
     assert result["data"][CONF_PASSWORD] == ""
     assert result["data"][CONF_DEVICE_PASSWORD] == "MYPW"  # 显式设备密码不回退
+    assert result["data"][CONF_SECURITY_CODE] == "MYPW"  # 安全码=设备密码回退
 
 
 @pytest.mark.asyncio
@@ -342,8 +342,7 @@ async def test_device_step_missing_login_keys_still_creates_entry():
     flow._password = "pw"
     result = await flow.async_step_device({
         CONF_DEVICE_ID: "DEV1",
-        CONF_SECURITY_CODE: "ABCD1234",
-        CONF_DEVICE_PASSWORD: "",
+        CONF_DEVICE_PASSWORD: "",  # 安全码输入框已移除
     })
     assert result["type"] == "create_entry"
     data = result["data"]

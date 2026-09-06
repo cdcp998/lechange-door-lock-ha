@@ -20,6 +20,7 @@ _CATALOGS: dict[str, dict[str, str]] = {
         "alarm.field.time": "时间",
         # labelType 行为映射(const.ALARM_LABEL_TYPE_NAMES 的各语言对应)
         "alarm.behavior.accessAlarm": "开门/出门事件",
+        "alarm.behavior.wander": "徘徊",
         # 兜底词
         "alarm.fallback.behavior": "未知行为",
         "alarm.fallback.title": "未知标题",
@@ -48,6 +49,7 @@ _CATALOGS: dict[str, dict[str, str]] = {
         "alarm.field.title": "Title",
         "alarm.field.time": "Time",
         "alarm.behavior.accessAlarm": "Open/exit event",
+        "alarm.behavior.wander": "Wandering",
         "alarm.fallback.behavior": "Unknown behavior",
         "alarm.fallback.title": "Unknown title",
         "alarm.fallback.time": "Unknown time",

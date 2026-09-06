@@ -45,6 +45,7 @@ import hmac
 import json
 import logging
 import random
+import secrets
 import ssl
 import string
 import time
@@ -1125,6 +1126,11 @@ class ImouClient:
                 f"CreateDeviceSnapkey output missing key/keyID: {outputs}"
             )
         # ② 消息域固化登记(服务端 keyId/tempKey; 时长窗口按配置本地计算)
+        # ★ usagePeriod 必须完整两段(逆向报告 §12e/§12f: App Add 带
+        #   '127-<今日>T0000Z-<今日+days>T2359Z'): 缺省落库 "127-" 会导致
+        #   App 列表/删除按完整 usagePeriod 匹配失败(残留)。
+        from .state_utils import build_usage_period
+
         raw = await self.async_smart_lock_secret_add(
             device_id,
             product_id,
@@ -1132,6 +1138,7 @@ class ImouClient:
             name=name,
             number=int(number),
             effect_days=int(max(effect_days, 1)),
+            usage_period=build_usage_period(int(max(effect_days, 1))),
             key_id=int(key_id),
         )
         return {
@@ -1176,7 +1183,9 @@ class ImouClient:
         epoch 秒**字符串**(App 形态)、usagePeriod 完整两段。
         """
         now = time.time()
-        key_id = key_id if key_id else random.randint(10000000, 99999999)
+        # keyId 段对齐 App/实测脚本(secret_api.py): [67000000, 68999999];
+        # 密钥类值用 secrets(CSPRNG), 8 位内删除匹配可靠(9 位踩坑)
+        key_id = key_id if key_id else secrets.randbelow(2000000) + 67000000
         payload = {
             "productId": product_id,
             "deviceId": device_id,
@@ -1231,6 +1240,61 @@ class ImouClient:
         if extra:
             payload.update(extra)
         return await self.async_post_msg("iot.message.SmartLockSecretDelete", payload)
+
+    async def async_sdl_standard_del_key(
+        self,
+        device_id: str,
+        product_id: str,
+        keys: list[dict],
+        channel_id: str = "0",
+    ) -> dict:
+        """设备域删除密钥 SetService sdl_standardDelKey (ref 211400) —— 2026-09-06 实测铁证.
+
+        ★ 实证: 对 keyId="abc"(消息域畸形/12100/500 记录) 直接 SetService
+        211400 → {code:10000}, ListV2 立即移除(total=0) —— 设备域按设备
+        数据库删除, 权限最大(绕过消息域对 state=0 草稿/非数字 keyId 的
+        12100/500)。App 删除链第一步即此服务(逆向 main.jsbundle @11842460:
+        setService(sdl_standardDelKey).then(()=>deleteKey(...)))。
+
+        keys: [{type, name, keyID, groupName?, groupID?}] —— keyID 为条目
+        keyId(字符串/数字); 设备域 ref 211443 定义 int(-1~999999), 超范围/
+        非数字用 -1(实测设备域对 -1+name 匹配可删)。type=3 临时密钥。
+        ref 编码(型号 SKG8J5RP 实测): 服务 211400, delKeys 211401,
+        type 211441, name 211442, keyID 211443, groupName 211444, groupID 211445;
+        子项 identifier 未转 ref 时服务端 11001 —— 故子项按实测 ref 硬编码。
+        """
+        # 子项 ref 编码(实测 SKG8J5RP; 跨型号经 model 动态解析)
+        item_refs = {"type": "211441", "name": "211442", "keyID": "211443",
+                     "groupName": "211444", "groupID": "211445"}
+        items = []
+        for k in keys or []:
+            if not isinstance(k, dict):
+                continue
+            item = {}
+            for kid, v in k.items():
+                if v is None:
+                    continue
+                item[item_refs.get(kid, kid)] = v
+            items.append(item)
+
+        model = await self.async_get_model(device_id, product_id)
+        # 服务/顶层 ref: 动态(跨型号) -> 回退实测硬编码
+        try:
+            service_ref = model.service_ref("sdl_standardDelKey")
+            top_ref = model.encode_service_input("sdl_standardDelKey", {"delKeys": []}).get("211401")
+        except Exception:  # noqa: BLE001
+            service_ref, top_ref = "211400", "211401"
+        input_data = {str(top_ref or "211401"): items}
+
+        payload = {
+            "deviceId": device_id,
+            "productId": product_id,
+            "channelId": channel_id,
+            "service": service_ref,
+            "inputData": input_data,
+        }
+        data = await self.async_post("iot.control.SetService", payload)
+        return model.decode_outputs(data.get("outputData") or {})
 
     async def async_get_alarm_messages(
         self,

@@ -199,6 +199,7 @@ LOCK_STATE_OPENED_KEYS = {LOCK_STATE_OPENED, LOCK_STATE_AJAR}
 # 其余类型码捕获后继续补充, 未收录的原样透传(数字码仍被展示层抑制)
 ALARM_LABEL_TYPE_NAMES = {
     "accessAlarm": "开门/出门事件",
+    "wander": "徘徊",
 }
 
 # 开门记录 keyType 枚举 → 中文

@@ -637,7 +637,12 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_abort(reason="device_not_found")
             await self.async_set_unique_id(device_id)
             self._abort_if_unique_id_configured()
-            security_code = str(user_input.get(CONF_SECURITY_CODE, "")).strip()
+            # ★ 安全码输入框已移除: 安全码从设备密码回退(未改过设备密码时
+            #   与安全码相同, 告警图解密/WSSE 仍可用); 无密钥时留空(媒体
+            #   解密优雅降级为不截图)。
+            security_code = str(
+                user_input.get(CONF_DEVICE_PASSWORD, "") or ""
+            ).strip()
             device_password = str(user_input.get(CONF_DEVICE_PASSWORD, "")).strip()
             login = self._login_data or {}
             # 登录数据缺键不再抛 KeyError(会以 HA "未知错误"收场): 全部回退空值,
@@ -701,10 +706,9 @@ class LeChangeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema = vol.Schema(
             {
                 vol.Required(CONF_DEVICE_ID): vol.In(devices_dict),
-                # 机身标签二维码/条码旁的 8 位大写字母数字串; 选填 —
-                # 仅告警截图解密/WSSE 需要, 留空可后补(集成"配置"里可编辑)
-                vol.Optional(CONF_SECURITY_CODE, default=""): cv.string,
-                # App"修改设备密码"后的当前值; 未改过则留空(=安全码)
+                # ★ 安全码输入框已移除(出厂凭据, 仅告警图解密/WSSE 需要):
+                #   填入设备密码即可(未改过设备密码时与安全码相同, 可解密)。
+                # App"修改设备密码"后的当前值; 未改过则留空(等同安全码)
                 vol.Optional(CONF_DEVICE_PASSWORD, default=""): cv.string,
             }
         )

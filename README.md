@@ -112,7 +112,6 @@
 #### 实体列表（每台设备）
 | 实体类型 | 功能 | 翻译键 |
 |----------|------|--------|
-| 门锁 | 已锁/未锁 + 远程开锁 | `lock.<name>_lock` |
 | 传感器 | 门锁电池电量 / 摄像头电池电量 | `sensor.<name>_battery_lock` 等 |
 | 传感器 | 门状态 / 电量模式 / WiFi 信号 / 最近开门记录 | `sensor.<name>_door_state` 等 |
 | 传感器 | 最近开门时间 / 最近开门方式 | `sensor.<name>_latest_open_door_time` 等 |
