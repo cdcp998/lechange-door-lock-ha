@@ -36,7 +36,8 @@ def _freeze_clock(monkeypatch):
             return datetime(2026, 9, 3, 0, 0, 0, tzinfo=tz)
 
     monkeypatch.setattr(ic, "datetime", FakeDT)
-    monkeypatch.setattr(ic.random, "choices", lambda seq, k=64: list("a") * k)
+    # nonce 现走 secrets.choice(CSPRNG); mock 返回固定 "a" 以稳定签名断言
+    monkeypatch.setattr(ic.secrets, "choice", lambda seq: "a")
     monkeypatch.setattr(ic, "_build_client_ua", lambda *a, **k: "FIXED_UA")
 
 

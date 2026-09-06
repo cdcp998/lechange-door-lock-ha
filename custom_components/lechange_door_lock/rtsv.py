@@ -441,7 +441,10 @@ class RtsvStreamSession:
         finally:
             writer.close()
             try:
-                await writer.wait_closed()
+                # ★ wait_closed 加超时: 对端不关(或半开连接)时等待会挂起,
+                #   asyncio 连接残留 → 后续采流/写入复用污染(童锁'只能一次,
+                #   重启 HA 才好'的可能源)。超时兜底释放。
+                await asyncio.wait_for(writer.wait_closed(), timeout=5.0)
             except (OSError, asyncio.TimeoutError):  # noqa: BLE001
                 pass
 

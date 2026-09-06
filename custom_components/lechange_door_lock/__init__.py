@@ -136,12 +136,13 @@ async def _persist_terminal_fingerprint(
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload the config entry."""
     domain_data = hass.data.setdefault(DOMAIN, {})
-    coordinator = domain_data.get(entry.entry_id)
-    if coordinator:
-        await coordinator.async_shutdown()
-
+    # ★ 先卸平台再拆协调器: 平台卸载失败返回 False 时 entry 保持加载,
+    #   协调器仍可继续供实体使用 (原顺序先 async_shutdown 会拆掉运行时)。
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        coordinator = domain_data.get(entry.entry_id)
+        if coordinator:
+            await coordinator.async_shutdown()
         domain_data.pop(entry.entry_id, None)
 
     return unload_ok

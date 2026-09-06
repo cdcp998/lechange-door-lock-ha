@@ -113,9 +113,7 @@ def resolve_child_lock(props: dict) -> Optional[bool]:
       属性(抓包 20260905: 值=2)**, 休眠期也可读。child_lock 缺失时
       由此回退。
     """
-    strict = decode_bool_prop(props.get("child_lock"))
-    if strict is not None:
-        return strict
+    # ★ 171700 优先(写入载体即真实状态; child_lock 只读上报可能滞后/固定)
     mode = _int_or_none(props.get("sdl_inOpenDoorModel"))
     if mode == 2:
         return True

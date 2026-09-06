@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
@@ -12,6 +14,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_DEVICE_ID, DOMAIN
 from .entity import LeChangeEntity
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -90,16 +94,22 @@ class LeChangeTamperSensor(_BaseLeChangeBinarySensor):
 
 
 class LeChangeChildLockSensor(_BaseLeChangeBinarySensor):
-    """Child lock / 童锁 engaged."""
+    """Child lock / 童锁 engaged.
 
-    _attr_device_class = BinarySensorDeviceClass.LOCK
+    ⚠️ 不用 BinarySensorDeviceClass.LOCK(其"已锁定/已解锁"文本与童锁
+    语义易混/与开关显示相反) — 显示 on/off 与开关"开/关"一致。
+    """
 
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "child_lock")
 
     @property
     def is_on(self) -> bool:
-        return bool((self.coordinator.data or {}).get("props", {}).get("child_lock"))
+        # 单一真源(child_lock 已过期不参与): resolve_child_lock(171700)
+        from .state_utils import resolve_child_lock
+
+        resolved = resolve_child_lock((self.coordinator.data or {}).get("props", {}))
+        return bool(resolved) if resolved is not None else False
 
 
 class LeChangeChannelOnlineSensor(_BaseLeChangeBinarySensor):

@@ -71,7 +71,10 @@ def dav_to_jpeg(data: bytes, key: bytes | None = None) -> bytes:
     head = _head_upto_second_dqt(head)
     so = -1
     for marker in (b"\xff\xc0", b"\xff\xc2"):
-        so = data.find(marker, ENC_START)
+        # ★ 起点 ENC_START+ENC_LEN(明文区): 原从密文区开始扫, 0.4% 概率
+        #   密文伪命中 \xff\xc0/\xff\xc2 拼出坏图(静默)。明文实际从 0x1EB 起,
+        #   跳过整个密文块后搜索更稳。
+        so = data.find(marker, ENC_START + ENC_LEN)
         if so >= 0:
             break
     if so < 0:

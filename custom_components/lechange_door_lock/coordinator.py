@@ -379,9 +379,14 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
                 )
 
         # 本次拿到属性才覆盖;空 props(休眠且快照缺)时保留上次值,
-        # 避免 MQTT 刚推的实时状态/电量/记录被轮询清零
+        # 避免 MQTT 刚推的实时状态/电量/记录被轮询清零。
+        # ★ 合并而非整体替换: 某次轮询缺 sdl_inOpenDoorModel 等键(休眠/
+        #   设备应答快)时覆盖会丢真值 → 状态闪跳(开关/传感器短暂变 None)。
         if props:
-            data["props"] = props
+            current = data.get("props") or {}
+            merged = dict(current)
+            merged.update(props)
+            data["props"] = merged
 
         # ---- derived fields(仅本次有对应原始字段时覆盖) --------------------
         if "doorLockStatus" in props:
@@ -470,7 +475,8 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         for note in notes:
             if not isinstance(note, dict):
                 continue
-            key = json.dumps(note, ensure_ascii=False)
+            # ★ sort_keys: 同一记录两次上报字段顺序不同会生成不同键 → 重复事件
+            key = json.dumps(note, ensure_ascii=False, sort_keys=True)
             if key in self._seen_lock_notes:
                 continue
             self._seen_lock_notes.add(key)

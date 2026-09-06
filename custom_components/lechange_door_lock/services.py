@@ -645,7 +645,7 @@ async def async_send_sms_code(call: ServiceCall):
     SMSLogin 等。结果经事件 sms_code_sent 返回。
     """
     hass = call.hass
-    coordinator = _first_coordinator(hass)
+    coordinator = _first_coordinator(hass, call.data["account"])
     if coordinator is None:
         raise HomeAssistantError("未找到已配置的集成(发送验证码需登录会话)")
     await coordinator.api.async_send_sms_code(call.data["account"], usage=call.data["usage"])
@@ -660,7 +660,7 @@ async def async_authorize_terminal(call: ServiceCall):
     失败时请改在乐橙 App 完成授权(登录页触发终端管理验证)。
     """
     hass = call.hass
-    coordinator = _first_coordinator(hass)
+    coordinator = _first_coordinator(hass, call.data["account"])
     if coordinator is None:
         raise HomeAssistantError("未找到已配置的集成(需登录会话)")
     result = await coordinator.api.async_granting_credit(
@@ -669,9 +669,18 @@ async def async_authorize_terminal(call: ServiceCall):
     _fire_event(hass, "terminal_authorized", call.data["account"], result=result)
 
 
-def _first_coordinator(hass: HomeAssistant):
+def _first_coordinator(hass: HomeAssistant, account: str | None = None):
+    """按账号匹配协调器; 不传 account 时取第一个(兼容旧调用).
+
+    ★ 多账号安装: 发送验证码/授权需用**目标账号**的会话(api.username 即
+    外部手机号, 登录时 "account\\" + username), 任意条目会拿错账号会话。
+    """
     for value in hass.data.get(DOMAIN, {}).values():
-        if isinstance(value, LeChangeDataUpdateCoordinator):
+        if not isinstance(value, LeChangeDataUpdateCoordinator):
+            continue
+        if account is not None and getattr(value.api, "username", "") == account:
+            return value
+        if account is None:
             return value
     return None
 

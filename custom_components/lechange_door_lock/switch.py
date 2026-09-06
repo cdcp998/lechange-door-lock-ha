@@ -14,7 +14,6 @@ from .const import (
     CONF_DEVICE_ID,
     DOMAIN,
     EVENT_PREFIX,
-    PROP_CALL_TRANSFER,
     PROP_CHILD_LOCK,
 )
 from .entity import LeChangeEntity
@@ -96,17 +95,28 @@ class LeChangeChildLockSwitch(_BaseLeChangeSwitch):
     def __init__(self, coordinator, device_id: str) -> None:
         super().__init__(coordinator, device_id, "child_lock", PROP_CHILD_LOCK)
 
+    def _value(self):
+        """★ 单一真源: 与 binary_sensor 完全一致用 resolve_child_lock
+        (171700 优先 + child_lock 兜底) — 两处永不相反。
+        """
+        from .state_utils import resolve_child_lock
+
+        resolved = resolve_child_lock((self.coordinator.data or {}).get("props", {}))
+        return bool(resolved) if resolved is not None else None
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self._value())
+
     async def _set_on(self, on: bool) -> None:
         coordinator = self.coordinator
-        # ★ 写前唤醒(尽力而为): GetRealTransferStreamUrl 自带唤醒语义,
-        #   sleep → ~2-4s online; 已在线则无副作用。失败不阻断(设备在线
-        #   窗口由唤醒请求触发, SetProperties 在线时才被设备接受)。
-        try:
-            await coordinator.ensure_awake(max_wait=12.0)
-        except Exception as err:  # noqa: BLE001 — 唤醒尽力而为
-            _LOGGER.debug("child-lock wake failed (continuing): %s", err)
-        # ★ 171700 enum: 2=童锁模式 / 1=普通开门模式(实测 ref 键 int 值 10000)
-        value = 2 if on else 1
+        value = 2 if on else 1  # 171700 enum: 2=童锁模式 / 1=普通开门模式
+
+        # ★ 官方链路(逆向 main.jsbundle 铁证): 写属性 = 直接
+        #   iot.control.SetProperties {properties:{171700: value}},
+        #   不唤醒/不取流/不 await 在线 — 官方允许休眠设备直接写,
+        #   "下次设备唤醒后生效"(feature_take_effect_next_device)。
+        #   RTS 采流"真唤醒"是自造多余动作(耗电/残留/等待源), 已去除。
         try:
             await coordinator.api.async_set_properties(
                 coordinator.device_id, coordinator.product_id,
@@ -115,9 +125,20 @@ class LeChangeChildLockSwitch(_BaseLeChangeSwitch):
         except Exception as err:
             _LOGGER.warning("属性 %s 设置失败: %s", self.WRITE_PROP, err)
             raise HomeAssistantError(f"设置童锁失败: {err}") from err
+        # ★ 乐观同步 props(写入成功即视为目标状态, 避免回弹; 设备应答
+        #   延迟/下次唤醒生效由轮询纠正)
+        coordinator.data.setdefault("props", {})[self.WRITE_PROP] = value
+        _LOGGER.info("child-lock 写入 %s=%s(官方链路, 不唤醒)", self.WRITE_PROP, value)
+        # ★ 广播 coordinator 状态变化(实体立即重算 is_on — 否则 HA 等
+        #   轮询才感知 props 变化 → '点击后 1 分钟才看到状态改变')
+        try:
+            coordinator.async_set_updated_data(coordinator.data)
+        except Exception as upd_err:  # noqa: BLE001
+            _LOGGER.debug("coordinator state broadcast failed: %s", upd_err)
         coordinator.hass.bus.async_fire(
             EVENT_PREFIX,
             {"type": "set_property", "device_id": self._device_id,
              "property": self.WRITE_PROP, "value": value},
         )
-        await coordinator.async_request_refresh()
+        # ★ 不再 async_request_refresh / 不再 RTS 唤醒: props 已同步,
+        #   轮询自会读到设备确认值; RTS 残留/等待/耗电一并消除。

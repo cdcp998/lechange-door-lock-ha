@@ -108,7 +108,7 @@ def _enc_account(account: str) -> str | None:
         from Crypto.Cipher import AES  # 可选依赖:仅加密场景需要
     except ImportError:
         return None
-    nonce = random.randbytes(12)
+    nonce = secrets.token_bytes(12)  # CSPRNG(原 random 可预测, 非对称加密应防)
     cipher = AES.new(_ENCRYPT_KEY, AES.MODE_GCM, nonce=nonce)
     ct, tag = cipher.encrypt_and_digest(account.encode())
     return _b64(nonce + ct + tag)
@@ -229,7 +229,7 @@ def _sign_payload(
       消息域        apiver=V10.2.2, charset=UTF-8(iot.message.* / 服务端生成类)
     terminal_id: 集成固定终端标识(避免与手机 App 同终端而互相顶号)
     """
-    nonce = "".join(random.choices(string.ascii_letters + string.digits, k=64))
+    nonce = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(64))
     date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     ua = _build_client_ua(terminal_id)
     body_md5 = _b64(hashlib.md5(body).digest())
@@ -334,7 +334,7 @@ class ImouClient:
         self.session_id = session_id
         self.token = d.get("token") or ""
         self.internal_username = d.get("username") or ""
-        self.api_host = (d.get("entryUrlV2") or API_ENTRY_HOST).replace(":443", "")
+        self.api_host = (d.get("entryUrlV2") or API_ENTRY_HOST).removesuffix(":443")
         self._save_session()
         _LOGGER.debug(
             "Login OK: user_id=%s host=%s session=%s",
@@ -750,7 +750,11 @@ class ImouClient:
         except ImouAPIError as err:
             if err.code in AUTH_FAIL_CODES and retry_auth and self.username and self.password:
                 _LOGGER.warning("Session invalid (%s), re-logging in...", err.code)
-                await self.async_login(self.username, self.password)
+                # ★ 并发 12002 → 多请求同时重登双 GetToken: 后到者用已作废 sid
+                #   → 10000+failNum → 抛 10001。重登串行化(锁): 后到协程等锁,
+                #   进锁时会话已被前一协程刷新 → 同 sid 下 GetToken 幂等成功。
+                async with self._login_lock:
+                    await self.async_login(self.username, self.password)
                 return await self.async_post(
                     api_name, payload, retry_auth=False, apiver=apiver, content_type=content_type
                 )
@@ -897,6 +901,11 @@ class ImouClient:
         "doorLockState", "doorLockStatus", "powerState", "powerMode",
         "devicePowerLock", "tamper", "child_lock", "openDoorByTouch",
         "wifiDoorLock", "lockNoteReport", "sleepStatus",
+        # ★ sdl_inOpenDoorModel(171700): 童锁真实载体(R10-Max) — 缺此则
+        #   GetProperties 从不返回 171700 → props 无童锁真值 → resolve
+        #   永远 None → 开关/传感器状态失效。child_lock(120000) 已过期
+        #   (设备只报 171700), 保留兼容其他机型。
+        "sdl_inOpenDoorModel",
     )
 
     async def async_get_properties(
@@ -1122,8 +1131,10 @@ class ImouClient:
         key = outputs.get("key") or outputs.get("26321")
         key_id = outputs.get("keyID") or outputs.get("26322")
         if not key or key_id in (None, "", 0):
+            # ★ ImouAPIError(code, desc): 文本必须放 desc(code 位为 int 契约,
+            #   否则 err.code 是 str → 所有按 code 判断失配)
             raise ImouAPIError(
-                f"CreateDeviceSnapkey output missing key/keyID: {outputs}"
+                -1, f"CreateDeviceSnapkey output missing key/keyID: {outputs}"
             )
         # ② 消息域固化登记(服务端 keyId/tempKey; 时长窗口按配置本地计算)
         # ★ usagePeriod 必须完整两段(逆向报告 §12e/§12f: App Add 带

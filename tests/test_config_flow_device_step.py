@@ -1313,25 +1313,26 @@ async def test_coordinator_fills_wifi_from_detail_info_cache():
 
 
 def test_resolve_child_lock_via_in_open_door_model():
-    """童锁双源: child_lock 缺失时回退 sdl_inOpenDoorModel(enum 1/2).
+    """童锁单一真源 = sdl_inOpenDoorModel(171700); child_lock 不参与.
 
     抓包 20260905 实证: R10-Max 云端缓存含 171700=2(童锁模式),
     无 120000(child_lock) — App 显示的"童锁开启"即前者。
+    ★ 2026-09-07: child_lock(120000) 语义与 171700 可能相反/混乱(用户实测
+    "开关+传感器恒定相反"), 双源混合只引入不一致 → 只用 171700。
     """
     from lechange_door_lock.state_utils import resolve_child_lock
 
-    # ① child_lock 在场优先(严格 bool)
-    assert resolve_child_lock({"child_lock": True}) is True
-    assert resolve_child_lock({"child_lock": 0}) is False
-    # ② 回退室内开门模式: 2=童锁, 1=普通
+    # ① 171700 单一真源: 2=童锁, 1=普通
     assert resolve_child_lock({"sdl_inOpenDoorModel": 2}) is True
     assert resolve_child_lock({"sdl_inOpenDoorModel": 1}) is False
     assert resolve_child_lock({"sdl_inOpenDoorModel": "2"}) is True
+    # ② child_lock 已不参与(仅 171700 缺失时仍未知)
+    assert resolve_child_lock({"child_lock": True}) is None
+    assert resolve_child_lock({"child_lock": 0}) is None
     # ③ 两源全缺 → 未知
     assert resolve_child_lock({}) is None
     assert resolve_child_lock({"sdl_inOpenDoorModel": 9}) is None
-    # ④ 语义冲突时 child_lock 优先
-    assert resolve_child_lock({"child_lock": False, "sdl_inOpenDoorModel": 2}) is False
+    assert resolve_child_lock({"child_lock": False, "sdl_inOpenDoorModel": 2}) is True
 
 
 @pytest.mark.asyncio
