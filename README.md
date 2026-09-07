@@ -1,5 +1,10 @@
 ## LeChange Door Lock 乐橙门锁 Home Assistant 集成
 
+[![CI](https://github.com/cdcp998/lechange-door-lock-ha/actions/workflows/ci.yml/badge.svg)](https://github.com/cdcp998/lechange-door-lock-ha/actions/workflows/ci.yml)
+[![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![Release](https://img.shields.io/github/v/release/cdcp998/lechange-door-lock-ha)](https://github.com/cdcp998/lechange-door-lock-ha/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 ### 📌 项目简介
 本项目是一个 Home Assistant 自定义集成，用于连接和控制乐橙（LeChange/Imou）智能门锁。
 **v1.1.0 起改用从客户端 App 抓取的私有云协议**（账号+密码 → x-pcs 签名 → 区域网关），
@@ -233,25 +238,6 @@ CI(`.github/workflows/hacs.yml`)同时运行 [HACS Action](https://github.com/ha
   进入「终端授权验证」步骤——发送授权短信验证码 → 输入 6 位验证码 → 终端入白名单
   并自动完成登录,全程无需打开乐橙 App。
 
-### 📜 更新日志
-统一更新日志见 [CHANGELOG.md](CHANGELOG.md)(发布时 CI 会自动提取并作为 Release 说明)。
-- **v1.6.5 (2026-09-05)**: 临时密码生成改两步式(App 同链路,服务端签发 key/keyID,设备离线自动回落);
-  keyId 收敛 8 位内 + 删除对齐 App 包并核验结果(修复 App 无法删除);"次数"误读字段修复;
-  告警/临时密码属性结构化 + 属性文本国际化;"最近开门方式/时间"排序与解析修复;
-  告警实体更名"告警信息";工作模式 select;MQTT 重连风暴修复(DISCONNECT 优雅释放)。
-- **v1.6.0 (2026-09-04)**: 会话信任模型落地(sid 持久/token 信任继承来源 sid 登录史/
-  10000 无 token 保持会话/多端互踢自愈);**自主续期登录链**(首次绑定后日常运行零人工);
-  **GT4 本地滑块验证**(12114 时在 HA 自身端口完成人机验证,容器零端口映射,不再要求
-  打开乐橙 App);AK 身份接口(CheckGeeTest4/GetValidCode/GetTokenBySMS);
-  GrantingCredit 按线上协议校准(原码直传/无 CheckValidCode 中间步);测试 153 例。
-- **v1.5.0 (2026-09-04)**: 云端实时预览/门外截图/告警图(DAV 解密)/本地通道地址;
-  两套设备密码体系;OSD 字体内置;MQTT 实时通道(控制 MQTT 优先 → 云 API 兜底);
-  UA 设备特征池。
-- **v1.4.0 (2026-09-03)**: 临时密码改用实测验证的云消息 API(设备休眠也可生成/列表);云侧告警轮询与 `alarm` 事件、最新告警传感器;单设备详情 API;通道在线 unique_id 等修复。支持**短信验证码登录**(账号密码/短信二选一);密码登录失败定向提示(需短信验证码/人机验证)。
-- **v1.3.0 (2026-09-03)**: 临时密码实体化配置(number/select/text/time)+ 生成/刷新按钮 + 数量传感器;最近开门时间/方式传感器;通道在线状态。(功能移植自社区分支持续改进)
-- **v1.2.0 (2026-09-03)**: 客户端私有云协议迁移;门锁/开关/摄像头(默认云端流媒体网关)/对话实体与服务;单测 + HACS/发布 CI;MIT LICENSE 与免责声明;修复登录会话死锁。(v1.1.0 为开发中间版本,已并入)
-- **v1.0.1 (2026-03-11)**: 添加开门记录(旧接口版本)。
-- **v1.0.0 (2026-03-10)**: 首次发布(旧开放平台接口版本)。
 
 ### 🐛 问题反馈
 请在此仓库的 [Issues](https://github.com/cdcp998/lechange-door-lock-ha/issues) 页面反馈。
