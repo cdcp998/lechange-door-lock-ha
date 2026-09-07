@@ -1,6 +1,6 @@
 ## LeChange Door Lock 乐橙门锁 Home Assistant 集成
 
-[![CI](https://github.com/cdcp998/lechange-door-lock-ha/actions/workflows/ci.yml/badge.svg)](https://github.com/cdcp998/lechange-door-lock-ha/actions/workflows/ci.yml)
+[![CI](https://github.com/cdcp998/lechange-door-lock-ha/actions/workflows/hacs.yml/badge.svg)](https://github.com/cdcp998/lechange-door-lock-ha/actions/workflows/hacs.yml)
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 [![Release](https://img.shields.io/github/v/release/cdcp998/lechange-door-lock-ha)](https://github.com/cdcp998/lechange-door-lock-ha/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
