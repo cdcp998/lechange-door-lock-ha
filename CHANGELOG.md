@@ -3,6 +3,7 @@
 Keep a Changelog 风格。发布 tag v* 时,CI 自动提取对应版本章节作为 GitHub Release 说明。
 版本号与 `custom_components/lechange_door_lock/manifest.json` 一致;**版本号只在发布时确定**,
 日常新功能/修复统一并入 [未发布],发布时再固化。
+更新日志简化.
 
 ---
 
