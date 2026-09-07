@@ -104,12 +104,15 @@ class LeChangeChildLockSensor(_BaseLeChangeBinarySensor):
         super().__init__(coordinator, device_id, "child_lock")
 
     @property
-    def is_on(self) -> bool:
+    def is_on(self) -> bool | None:
         # 单一真源(child_lock 已过期不参与): resolve_child_lock(171700)
         from .state_utils import resolve_child_lock
 
         resolved = resolve_child_lock((self.coordinator.data or {}).get("props", {}))
-        return bool(resolved) if resolved is not None else False
+        # ★ 未知(键缺失/半睡应答不完整) → None → HA 显示"未知",
+        #   绝不回落 False("关") —— 否则 props 短暂缺键时实体就在
+        #   开/关 之间跳动(状态不稳定根因之三)。
+        return resolved
 
 
 class LeChangeChannelOnlineSensor(_BaseLeChangeBinarySensor):

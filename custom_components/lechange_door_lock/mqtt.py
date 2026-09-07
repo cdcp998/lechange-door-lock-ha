@@ -176,6 +176,14 @@ class MqttManager:
         return _build_head("uuid\\" + uid, token, uid, self.api.terminal_id)
 
     # ---------------------------------------------------------------- control
+    # ★ MQTT 只读铁律(2026-09 用户约束 + 热更实证): MQTT 通道仅允许读类
+    #   接口(订阅推送/查询), 写与服务(Set*/SendToRemoter/transfer)一律
+    #   走 HTTP 云 API —— 本入口遇写类 API 直接拒绝, 防未来误用回归。
+    MQTT_FORBIDDEN_API_MARKERS = (
+        ".Set", "SendToRemoter", "SetIotService", "SetProperties",
+        "SetIotProperties", "SetService", "transfer.device",
+    )
+
     async def async_request(self, api: str, params: dict, timeout: float = 10.0) -> dict:
         """控制/设置请求 —— **一律走云 API**(MQTT 写通道已废弃).
 
@@ -183,7 +191,15 @@ class MqttManager:
           被服务端拒绝, 需私有 CA) —— 本方法仅保留签名兼容(账号 facade/
           历史调用), 内部直接走 cloud_ctrl(HTTP 云 API); timeout 仅签名
           兼容, 云 API 自带超时。
+        ★ 只读铁律: 写/服务类 API 在此直接拒绝(不允许"经 MQTT 层转 HTTP"
+          的歧义路径), 调用方必须显式走 imou_client.async_post。
         """
+        for marker in self.MQTT_FORBIDDEN_API_MARKERS:
+            if marker in api:
+                raise ValueError(
+                    f"MQTT channel is read-only; refusing {api!r} — "
+                    "use ImouClient.async_post (HTTP) for writes/services"
+                )
         data = await self.cloud_ctrl(api, params)
         if isinstance(data, dict):
             data = dict(data)

@@ -84,6 +84,31 @@ class ImouAPIError(Exception):
         super().__init__(f"Imou API error {code}: {desc}")
 
 
+def _epoch_seconds_or_none(value: Any) -> Optional[int]:
+    """Parse CreateDeviceSnapkey output time (26326/26327) → epoch seconds.
+
+    服务端出参形态未定(实测样本 '1788597579' 纯数字字符串;兼容
+    'YYYYMMDDTHHMMSS'/ISO 文本): 纯数字按秒解析; 其余文本尝试
+    datetime 解析失败返回 None(调用方回落本地计算)。
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    for fmt in ("%Y%m%dT%H%M%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return int(datetime.strptime(text, fmt).timestamp())
+        except ValueError:
+            continue
+    try:
+        return int(datetime.fromisoformat(text).timestamp())
+    except ValueError:
+        return None
+
+
 def _md5_hex_lower(s: str) -> str:
     return hashlib.md5(s.encode()).hexdigest().lower()
 
@@ -309,6 +334,10 @@ class ImouClient:
         self._on_login_blocked = on_login_blocked
 
         self._model_cache: dict[str, "ModelInfo"] = {}
+        # 模型双端点状态(按 product 维度): md5 缓存链(App 同款) + 新端点
+        # 失败记忆(老设备/旧平台产品自动固定走 QueryModelInfo, 不反复试新)
+        self._model_md5: dict[str, str] = {}
+        self._model_new_api_failed: set[str] = set()
         self._on_session_update = on_session_update  # callable(session dict) -> None
         self._login_lock = asyncio.Lock()
 
@@ -879,11 +908,86 @@ class ImouClient:
         return any("unlock" in (ch.get("functions") or []) for ch in device.get("channels", []))
 
     # ------------------------------------------------------------------ model
+    @staticmethod
+    def _parse_model_payload(data: dict) -> Optional[dict]:
+        """从模型端点响应中提取物模型 dict(双字段/双形态兼容).
+
+        字段兼容: 新端点抓包为 `modelPlatFormJson`(bundle 同款), 我们落盘
+        的响应样例为 `modelJson` —— 两者都可能是 dict 或 JSON 字符串。
+        返回 None = 无有效模型体(md5 命中空回)。
+        """
+        for key in ("modelPlatFormJson", "modelJson"):
+            raw = data.get(key)
+            if raw is None:
+                continue
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(raw, dict) and raw:
+                return raw
+        return None
+
     async def async_get_model(self, device_id: str, product_id: str) -> "ModelInfo":
-        """Fetch (and cache) the model definition: identifier<->ref, types, enums."""
+        """Fetch (and cache) the model definition: identifier<->ref, types, enums.
+
+        ★ 双端点兼容(2026-09 热更对齐, 用户审核通过):
+          - **新设备**优先 `iot.manager.GetModelAndPlatFormJsonByProduct`
+            (App 进设备页必调; 物模型更全 → 能力门控可识别更多设定/实体);
+          - **老设备**(旧平台产品)新端点失败 → 自动回落
+            `iot.manager.QueryModelInfo` 并记忆该 product, 此后不再试新
+            (每产品仅一次额外请求的代价);
+          - **md5 缓存链(App 同款)**: 请求带缓存 md5(无缓存发 App 哨兵值
+            'admin'); 服务端命中回空体 → 复用本地已缓存模型(同 product
+            任意设备)。
+        """
         cache_key = f"{device_id}:{product_id}"
         if cache_key in self._model_cache:
             return self._model_cache[cache_key]
+
+        # --- 新端点(未标记失败时优先) -------------------------------------
+        if product_id not in self._model_new_api_failed:
+            payload = {
+                "deviceId": device_id,
+                "productId": product_id,
+                "md5": self._model_md5.get(product_id) or "admin",
+            }
+            try:
+                data = await self.async_post(
+                    "iot.manager.GetModelAndPlatFormJsonByProduct", payload
+                )
+                raw = self._parse_model_payload(data)
+                if raw is not None:
+                    info = ModelInfo(raw)
+                    md5 = str(data.get("md5") or "")
+                    if md5:
+                        self._model_md5[product_id] = md5
+                    self._model_cache[cache_key] = info
+                    return info
+                # 空体(md5 命中): 复用同 product 已缓存模型; 无缓存可复用
+                # → 新端点不可用, 标记失败走旧端点
+                same_product = next(
+                    (m for k, m in self._model_cache.items()
+                     if k.endswith(f":{product_id}")),
+                    None,
+                )
+                if same_product is not None:
+                    self._model_cache[cache_key] = same_product
+                    return same_product
+                self._model_new_api_failed.add(product_id)
+                _LOGGER.debug(
+                    "GetModelAndPlatFormJsonByProduct empty for %s — "
+                    "falling back to QueryModelInfo", product_id,
+                )
+            except (ImouAPIError, json.JSONDecodeError, TypeError, ValueError) as err:
+                self._model_new_api_failed.add(product_id)
+                _LOGGER.debug(
+                    "GetModelAndPlatFormJsonByProduct failed for %s (%s) — "
+                    "falling back to QueryModelInfo", product_id, err,
+                )
+
+        # --- 旧端点(老设备兼容路径) ---------------------------------------
         data = await self.async_post(
             "iot.manager.QueryModelInfo", {"deviceId": device_id, "productId": product_id}
         )
@@ -918,6 +1022,11 @@ class ImouClient:
           裸调不带列表 → 服务端立即返回(休眠设备=空/10003);
           带列表 → 服务端等待设备应答(最长 timeout ms), 童锁/WiFi/
           门状态等实时值由此获得。
+        ★ 2026-09 热更对齐: 读优先新协议 `iot.control.GetIotProperties`
+          (main.jsbundle 白名单; 原生层带 productId 自动切新协议)。旧
+          `iot.control.GetProperties` 在热更包仍有 3 处调用 —— 新旧并存,
+          旧端点未废弃, 故**响应缺 properties 键或 11001 时回退旧端点**,
+          读链路(全集成生命线)不允许单点依赖未充分实测的新端点。
         """
         model = await self.async_get_model(device_id, product_id)
         payload = {
@@ -929,10 +1038,25 @@ class ImouClient:
             "qos": 1,
         }
         # 服务端最长等设备应答 15s → HTTP 超时必须给更长(20s)
-        data = await self.async_post(
-            "iot.control.GetProperties", payload, timeout=20.0
-        )
-        props = data.get("properties") or data or {}
+        try:
+            data = await self.async_post(
+                "iot.control.GetIotProperties", payload, timeout=20.0
+            )
+            props = data.get("properties")
+        except ImouAPIError as err:
+            if err.code not in (11001, -1):
+                raise
+            props = None
+            _LOGGER.debug(
+                "GetIotProperties rejected (%s) — falling back to GetProperties",
+                err,
+            )
+        if not isinstance(props, dict) or not props:
+            # 新端点无 properties(未实测充分/网关差异) → 旧端点重试一次
+            data = await self.async_post(
+                "iot.control.GetProperties", payload, timeout=20.0
+            )
+            props = data.get("properties") or data or {}
         return model.decode_properties(props)
 
     async def async_set_service(
@@ -969,7 +1093,14 @@ class ImouClient:
     async def async_set_properties(
         self, device_id: str, product_id: str, properties: dict, channel_id: str = "0"
     ) -> dict:
-        """Write properties via iot.control.SetProperties (ref-keyed).
+        """Write properties (ref-keyed). 热更新协议 SetIotProperties 优先.
+
+        ★ 2026-09 热更对齐(main.jsbundle 白名单 + 原生层带 productId 自动
+          切新协议):写走 `iot.control.SetIotProperties` —— 开门设置报告
+          §3.2 实测 int 值 10000, 与 SetProperties 等价。
+        ★ 回退: 仅 `11001`(接口不识别/旧网关)回落旧端点
+          `iot.control.SetProperties`; 设备面错误(19999 拒收/10003 休眠)
+          **不回退**(那是设备状态, 换端点无意义, 由上层唤醒重试处理)。
 
         同 SetService:属性键必须用 ref 编码(bool 值转 1/0),identifier 键
         会被服务端拒绝(10003/11001)。
@@ -981,7 +1112,16 @@ class ImouClient:
             "channelId": channel_id,
             "properties": model.encode_properties(properties),
         }
-        return await self.async_post("iot.control.SetProperties", payload)
+        try:
+            return await self.async_post("iot.control.SetIotProperties", payload)
+        except ImouAPIError as err:
+            if err.code != 11001:
+                raise
+            _LOGGER.debug(
+                "SetIotProperties rejected (%s) — falling back to SetProperties",
+                err,
+            )
+            return await self.async_post("iot.control.SetProperties", payload)
 
     # ------------------------------------------------------- work mode(工作模式)
     async def async_get_work_mode(
@@ -1102,7 +1242,7 @@ class ImouClient:
         """两步式生成临时密码(服务端签发 key/keyID, App 同链路).
 
         ① iot.control.SetService · CreateDeviceSnapkey(ref 26300):
-           入参 name/number(-1 不限)/effectTimes(天)/effectPeriod(整天);
+           入参 name/number(-1 不限)/effectTimes(天)/effectPeriod(**逐日条目**);
            出参 26321 密码明文 / 26322 keyID / 26326-27 创建与失效时间。
         ② iot.message.SmartLockSecretAdd 固化登记(服务端 keyId/tempKey)。
 
@@ -1110,11 +1250,22 @@ class ImouClient:
         出参缺 keyID/key(设备离线 10003/模型无此服务)→ 抛 ImouAPIError,
         由调用方回落客户端自产路径。
         """
-        period = [{
-            "26341": 127,  # 周位图: 127=每天(起止时刻全天, 热更同款 ref 键)
-            "26342": "000:00:00",
-            "26343": "023:59:59",
-        }]
+        # ★ effectPeriod = App 同款**逐日条目**(bundle ue() 三重实证):
+        #   26341 是枚举(0=周日..6=周六), App 对"每天"发 7 条 {26341:0..6},
+        #   usagePeriod 的 127 位图是 App 本地由这 7 项算出的(S[P[26341]]=1
+        #   → parseInt('1111111',2)=127) —— **从不作为 26341 下发**。
+        #   HA 曾发 {26341:127} 单条: 127 不在枚举内 → 设备侧无法落日程 →
+        #   密钥不被设备认可(state 恒 0) → 锁激活同步时被服务端清理/
+        #   下发失败(用户问题1 的病根)。
+        # ★ 26342/26343 时间格式 = 'T'+HHMMSS(无冒号): App 兜底值
+        #   'T000000'/'T235959'(bundle ue()), 且抓包 App Add 的
+        #   usagePeriod 'T0000Z' 段 = P[26342].substring(0,5) —— 只有
+        #   'T000000' 截 5 位得 'T0000'; '000:00:00' 截 5 位是 '000:0',
+        #   与抓包 '127-20260905T0000Z-...' 不符 → 旧格式已被证伪。
+        period = [
+            {"26341": day, "26342": "T000000", "26343": "T235959"}
+            for day in range(7)
+        ]
         outputs = await self.async_set_service(
             device_id,
             product_id,
@@ -1136,8 +1287,14 @@ class ImouClient:
             raise ImouAPIError(
                 -1, f"CreateDeviceSnapkey output missing key/keyID: {outputs}"
             )
-        # ② 消息域固化登记(服务端 keyId/tempKey; 时长窗口按配置本地计算)
-        # ★ usagePeriod 必须完整两段(逆向报告 §12e/§12f: App Add 带
+        # ② 消息域固化登记 —— 与 App addTempKeyToSass 逐字段对齐:
+        # ★ tempKey 原样(不 zfill): App 直取出参 e[keyRef]; 补零会改变
+        #   密码 → 与设备签发值不一致 → 服务端无法与设备侧对账
+        #   (state 恒 0 → 激活时被清理/下发失败, 问题1)。
+        # ★ createTime/expiredTime = 服务端签发值(26326/26327)原样回传
+        #   (App A(e): v=出参createTime, h=出参expiresTime) —— 本地 now
+        #   与设备时钟不一致同样对不上账。
+        # ★ usagePeriod 必须完整两段(App Add 带
         #   '127-<今日>T0000Z-<今日+days>T2359Z'): 缺省落库 "127-" 会导致
         #   App 列表/删除按完整 usagePeriod 匹配失败(残留)。
         from .state_utils import build_usage_period
@@ -1145,17 +1302,19 @@ class ImouClient:
         raw = await self.async_smart_lock_secret_add(
             device_id,
             product_id,
-            str(key).zfill(8),
+            str(key),
             name=name,
             number=int(number),
             effect_days=int(max(effect_days, 1)),
             usage_period=build_usage_period(int(max(effect_days, 1))),
             key_id=int(key_id),
+            create_time=outputs.get("createTime") or outputs.get("26326"),
+            expires_time=outputs.get("expiresTime") or outputs.get("26327"),
         )
         return {
             "mode": "server",
             "key_id": int(key_id),
-            "temp_key": str(key).zfill(8),
+            "temp_key": str(key),
             "create_time": outputs.get("createTime") or outputs.get("26326"),
             "expires_time": outputs.get("expiresTime") or outputs.get("26327"),
             "raw": raw,
@@ -1184,6 +1343,8 @@ class ImouClient:
         effect_days: int = 1,
         usage_period: str = "",
         key_id: Optional[int] = None,
+        create_time: Any = None,
+        expires_time: Any = None,
     ) -> dict:
         """添加临时密码 (iot.message.SmartLockSecretAdd; 消息域 apiver=V10.2.2).
 
@@ -1192,11 +1353,18 @@ class ImouClient:
         匹配不上 → 列表残留,历史踩坑)、tempKey 8 位、type=3、number=-1
         (不限次数)、effectTimes=有效天数、createTime/expiredTime 为真实
         epoch 秒**字符串**(App 形态)、usagePeriod 完整两段。
+
+        create_time/expires_time: 两步式路径传入**服务端签发**的
+        26326/26327 原值(App addTempKeyToSass 直取出参 v/h)—— 本地重算
+        的时间与设备侧记录不一致时服务端无法对账; 缺省(None, 客户端自产
+        回落路径)按本地 epoch 计算。
         """
         now = time.time()
         # keyId 段对齐 App/实测脚本(secret_api.py): [67000000, 68999999];
         # 密钥类值用 secrets(CSPRNG), 8 位内删除匹配可靠(9 位踩坑)
         key_id = key_id if key_id else secrets.randbelow(2000000) + 67000000
+        create_ts = _epoch_seconds_or_none(create_time)
+        expire_ts = _epoch_seconds_or_none(expires_time)
         payload = {
             "productId": product_id,
             "deviceId": device_id,
@@ -1209,10 +1377,14 @@ class ImouClient:
             "location": "",
             "isHijackAlarm": 0,
             "attribute": 0,
-            "createTime": str(int(now)),    # App 抓包: epoch 秒字符串
+            "createTime": str(create_ts if create_ts is not None else int(now)),
             "number": number,
             "effectTimes": effect_days,
-            "expiredTime": str(int(now) + 86400 * max(effect_days, 1)),
+            "expiredTime": str(
+                expire_ts
+                if expire_ts is not None
+                else int(now) + 86400 * max(effect_days, 1)
+            ),
             "usagePeriod": usage_period or "127-",
         }
         return await self.async_post_msg("iot.message.SmartLockSecretAdd", payload)
@@ -1459,6 +1631,20 @@ class ModelInfo:
             if str(item.get("value")) == str(value):
                 return item.get("desc", "")
         return ""
+
+    # ------------------------------------------- device capability(能力门控)
+    def has_property(self, identifier: str) -> bool:
+        """True when the device model declares this property.
+
+        能力门控第一道: 实体只有在本机物模型中声明才创建(不同机型/固件
+        物模型差异大, 盲建实体 → unavailable 刷屏)。
+        """
+        return identifier in self._props_by_identifier
+
+    def property_access_mode(self, identifier: str) -> str:
+        """Declared accessMode ('r'/'rw'); unknown identifier → ''."""
+        p = self._props_by_identifier.get(identifier)
+        return str(p.get("accessMode", "")) if p else ""
 
     # ------------------------------------------------- ref encoding (线上协议)
     def service_ref(self, identifier: str) -> str:

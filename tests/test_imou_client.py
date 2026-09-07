@@ -12,7 +12,7 @@ from datetime import datetime
 import pytest
 
 import lechange_door_lock.imou_client as ic
-from lechange_door_lock.imou_client import ImouAPIError, ImouClient
+from lechange_door_lock.imou_client import ImouAPIError, ImouClient, ModelInfo
 
 
 # --------------------------------------------------------------------- keys
@@ -325,6 +325,54 @@ class TestMessageDomain:
         assert p["keyId"] > 0  # 客户端生成
         assert p["keyId"] <= 99999999  # ★ 8 位内(App 一致; 9 位删除匹配不上)
 
+    async def test_secret_add_server_issued_times_passthrough(self):
+        """两步式 Add: 服务端签发 createTime/expiredTime 原样回传(App v/h).
+
+        bundle addTempKeyToSass: v=出参 createTime, h=出参 expiresTime ——
+        本地重算与设备侧记录不一致 → 对账失败 → state 恒 0(问题1 病根)。
+        """
+        session = FakeSession({
+            "iot.message.SmartLockSecretAdd": lambda: _resp({"code": 10000, "data": {}}),
+        })
+        await self._client(session).async_smart_lock_secret_add(
+            "SN", "PID", "82394892", name="Test", number=-1, effect_days=1,
+            usage_period="127-20260906T0000Z-20260907T2359Z",
+            key_id=67157501,
+            create_time="1788597579", expires_time="1788683978",
+        )
+        body = json.loads(session.calls_full[0][1]["data"])
+        p = body["data"]
+        assert p["createTime"] == "1788597579"
+        assert p["expiredTime"] == "1788683978"
+        assert p["keyId"] == 67157501
+
+    async def test_secret_add_time_output_parse_variants(self):
+        """26326/26327 出参兼容: 纯数字串/'YYYYMMDDTHHMMSS'/畸形(回落本地)."""
+        session = FakeSession({
+            "iot.message.SmartLockSecretAdd": lambda: _resp({"code": 10000, "data": {}}),
+        })
+        client = self._client(session)
+        # 纯数字串
+        await client.async_smart_lock_secret_add(
+            "SN", "PID", "11111111", create_time=" 1788597579 ")
+        p = json.loads(session.calls_full[-1][1]["data"])["data"]
+        assert p["createTime"] == "1788597579"
+        # 数字型 int
+        await client.async_smart_lock_secret_add(
+            "SN", "PID", "11111111", expires_time=1788683978)
+        p = json.loads(session.calls_full[-1][1]["data"])["data"]
+        assert p["expiredTime"] == "1788683978"
+        # 'YYYYMMDDTHHMMSS' 文本 → 按秒解析
+        await client.async_smart_lock_secret_add(
+            "SN", "PID", "11111111", create_time="20260903T120000")
+        p = json.loads(session.calls_full[-1][1]["data"])["data"]
+        assert isinstance(p["createTime"], str) and p["createTime"].isdigit()
+        # 畸形值 → None → 回落本地 epoch(仍为数字字符串)
+        await client.async_smart_lock_secret_add(
+            "SN", "PID", "11111111", create_time="not-a-time")
+        p = json.loads(session.calls_full[-1][1]["data"])["data"]
+        assert isinstance(p["createTime"], str) and p["createTime"].isdigit()
+
     async def test_create_snapkey_two_step_server_issued(self):
         """两步式: SetService(CreateDeviceSnapkey) 服务端签发 → Add 固化.
 
@@ -332,6 +380,7 @@ class TestMessageDomain:
         (26321 key/26322 keyID) —— 设备侧流水因此知晓密钥。
         """
         session = FakeSession({
+            "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({"code": 11001, "desc": "old device"}),
             "iot.manager.QueryModelInfo": lambda: _resp(
                 {"code": 10000, "data": {"modelJson": _model_raw_with_snapkey()}}
             ),
@@ -352,23 +401,36 @@ class TestMessageDomain:
         assert created["mode"] == "server"
         assert created["key_id"] == 67157501
         assert created["temp_key"] == "82394892"
+        # 服务端签发时间透传(App addTempKeyToSass 直取出参 v/h)
+        assert created["create_time"] == "1788597579"
+        assert created["expires_time"] == "1788683978"
 
         # ① SetService: service=26300, 入参 ref 键(name/number/effectTimes/period)
+        # ★ effectPeriod = App ue() 同款逐日条目: 26341 是枚举(0..6, 周日..周六),
+        #   "每天" = 7 条; 127 是 App 本地算 usagePeriod 位图用的, 从不发给设备;
+        #   时间 'T'+HHMMSS(bundle 'T000000'/'T235959', 无冒号)。
         calls = {api: kwargs for api, kwargs in session.calls_full}
         body = json.loads(calls["iot.control.SetService"]["data"])["data"]
         assert body["service"] == "26300"
         assert body["inputData"] == {
             "26301": "Test", "26303": -1, "26302": 1,
-            "26304": [{"26341": 127, "26342": "000:00:00", "26343": "023:59:59"}],
+            "26304": [
+                {"26341": d, "26342": "T000000", "26343": "T235959"}
+                for d in range(7)
+            ],
         }
-        # ② Add: 使用服务端签发的 keyId/tempKey(非客户端随机)
+        # ② Add: 服务端签发的 keyId/tempKey + **签发时间原样回传**
+        #   (本地 now 与设备侧不一致 → 对账失败/state 恒 0, 问题1 病根)
         p = json.loads(calls["iot.message.SmartLockSecretAdd"]["data"])["data"]
         assert p["keyId"] == 67157501
         assert p["tempKey"] == "82394892"
+        assert p["createTime"] == "1788597579"
+        assert p["expiredTime"] == "1788683978"
 
     async def test_create_snapkey_missing_output_raises(self):
         """出参缺 key/keyID(设备离线 10003 → outputData 空)→ 抛错供回落."""
         session = FakeSession({
+            "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({"code": 11001, "desc": "old device"}),
             "iot.manager.QueryModelInfo": lambda: _resp(
                 {"code": 10000, "data": {"modelJson": _model_raw_with_snapkey()}}
             ),
@@ -634,6 +696,7 @@ class TestRefEncoding:
         """async_set_service 发送的 body: service=ref、键=ref、authInfo->client."""
         session = FakeSession(
             {
+                "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({"code": 11001, "desc": "old device"}),
                 "iot.manager.QueryModelInfo": lambda: _resp(
                     {"code": 10000, "data": {"modelJson": _model_raw()}}
                 ),
@@ -659,13 +722,17 @@ class TestRefEncoding:
         assert "serviceName" not in body["data"]
         assert "authInfo" not in body["data"]
 
-    async def test_set_properties_payload_uses_ref(self):
+    async def test_set_properties_payload_uses_ref_new_endpoint(self):
+        """写属性走热更新协议 SetIotProperties(值 ref 编码 + bool→1/0)."""
         session = FakeSession(
             {
+                "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({"code": 11001, "desc": "old device"}),
                 "iot.manager.QueryModelInfo": lambda: _resp(
                     {"code": 10000, "data": {"modelJson": _model_raw()}}
                 ),
-                "iot.control.SetProperties": lambda: _resp({"code": 10000, "data": {}}),
+                "iot.control.SetIotProperties": lambda: _resp(
+                    {"code": 10000, "data": {}}
+                ),
             }
         )
         client = ImouClient(
@@ -676,9 +743,147 @@ class TestRefEncoding:
             "SN1", "SKG8J5R0", {"openDoorCombined": True}, channel_id="0"
         )
         api, kwargs = session.calls_full[-1]
-        assert api == "iot.control.SetProperties"
+        assert api == "iot.control.SetIotProperties"
         body = json.loads(kwargs["data"].decode())
         assert body["data"]["properties"] == {"106400": 1}
+
+    async def test_set_properties_falls_back_on_11001(self):
+        """SetIotProperties 被 11001 拒(旧网关) → 回落旧 SetProperties 一次."""
+        session = FakeSession(
+            {
+                "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({"code": 11001, "desc": "old device"}),
+                "iot.manager.QueryModelInfo": lambda: _resp(
+                    {"code": 10000, "data": {"modelJson": _model_raw()}}
+                ),
+                "iot.control.SetIotProperties": lambda: _resp(
+                    {"code": 11001, "desc": "unknown api"}
+                ),
+                "iot.control.SetProperties": lambda: _resp(
+                    {"code": 10000, "data": {}}
+                ),
+            }
+        )
+        client = ImouClient(
+            session, session_id="s", token="t", internal_username="u",
+            api_host="https://gw.example.com",
+        )
+        await client.async_set_properties(
+            "SN1", "SKG8J5R0", {"openDoorCombined": True}, channel_id="0"
+        )
+        apis = [a for a, _ in session.calls_full]
+        # 模型双端点: 新端点 11001(老设备) → QueryModelInfo → 写新协议 → 回落
+        assert apis == [
+            "iot.manager.GetModelAndPlatFormJsonByProduct",
+            "iot.manager.QueryModelInfo",
+            "iot.control.SetIotProperties",
+            "iot.control.SetProperties",
+        ]
+
+    async def test_set_properties_device_error_no_fallback(self):
+        """设备面错误(19999 拒收/10003 休眠)不换端点 — 换端点无意义."""
+        session = FakeSession(
+            {
+                "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({"code": 11001, "desc": "old device"}),
+                "iot.manager.QueryModelInfo": lambda: _resp(
+                    {"code": 10000, "data": {"modelJson": _model_raw()}}
+                ),
+                "iot.control.SetIotProperties": lambda: _resp(
+                    {"code": 19999, "desc": "device error code:-1"}
+                ),
+            }
+        )
+        client = ImouClient(
+            session, session_id="s", token="t", internal_username="u",
+            api_host="https://gw.example.com",
+        )
+        with pytest.raises(ImouAPIError) as ei:
+            await client.async_set_properties(
+                "SN1", "SKG8J5R0", {"openDoorCombined": True}, channel_id="0"
+            )
+        assert ei.value.code == 19999
+        apis = [a for a, _ in session.calls_full]
+        assert "iot.control.SetProperties" not in apis
+
+    async def test_get_properties_prefers_new_endpoint(self):
+        """读属性优先 GetIotProperties; 新端点返回 properties 正常解码."""
+        session = FakeSession(
+            {
+                "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({"code": 11001, "desc": "old device"}),
+                "iot.manager.QueryModelInfo": lambda: _resp(
+                    {"code": 10000, "data": {"modelJson": _model_raw()}}
+                ),
+                "iot.control.GetIotProperties": lambda: _resp(
+                    {"code": 10000, "data": {"properties": {"106400": 1}}}
+                ),
+            }
+        )
+        client = ImouClient(
+            session, session_id="s", token="t", internal_username="u",
+            api_host="https://gw.example.com",
+        )
+        props = await client.async_get_properties(
+            "SN1", "SKG8J5R0", "0", properties=["openDoorCombined"]
+        )
+        apis = [a for a, _ in session.calls_full]
+        assert "iot.control.GetIotProperties" in apis
+        assert props.get("openDoorCombined") is True
+
+    async def test_get_properties_falls_back_without_properties_key(self):
+        """新端点响应缺 properties 键 → 旧 GetProperties 兜底一次."""
+        session = FakeSession(
+            {
+                "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({"code": 11001, "desc": "old device"}),
+                "iot.manager.QueryModelInfo": lambda: _resp(
+                    {"code": 10000, "data": {"modelJson": _model_raw()}}
+                ),
+                "iot.control.GetIotProperties": lambda: _resp(
+                    {"code": 10000, "data": {}}
+                ),
+                "iot.control.GetProperties": lambda: _resp(
+                    {"code": 10000, "data": {"properties": {"106400": 0}}}
+                ),
+            }
+        )
+        client = ImouClient(
+            session, session_id="s", token="t", internal_username="u",
+            api_host="https://gw.example.com",
+        )
+        props = await client.async_get_properties(
+            "SN1", "SKG8J5R0", "0", properties=["openDoorCombined"]
+        )
+        apis = [a for a, _ in session.calls_full]
+        assert apis[-2:] == [
+            "iot.control.GetIotProperties",
+            "iot.control.GetProperties",
+        ]
+        assert props.get("openDoorCombined") is False
+
+    async def test_get_properties_falls_back_on_11001(self):
+        """GetIotProperties 11001(旧网关) → 回落旧 GetProperties."""
+        session = FakeSession(
+            {
+                "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({"code": 11001, "desc": "old device"}),
+                "iot.manager.QueryModelInfo": lambda: _resp(
+                    {"code": 10000, "data": {"modelJson": _model_raw()}}
+                ),
+                "iot.control.GetIotProperties": lambda: _resp(
+                    {"code": 11001, "desc": "unknown api"}
+                ),
+                "iot.control.GetProperties": lambda: _resp(
+                    {"code": 10000, "data": {"properties": {"106400": 1}}}
+                ),
+            }
+        )
+        client = ImouClient(
+            session, session_id="s", token="t", internal_username="u",
+            api_host="https://gw.example.com",
+        )
+        props = await client.async_get_properties(
+            "SN1", "SKG8J5R0", "0", properties=["openDoorCombined"]
+        )
+        apis = [a for a, _ in session.calls_full]
+        assert "iot.control.GetProperties" in apis
+        assert props.get("openDoorCombined") is True
 
     async def test_switch_payload_roundtrip_bool(self):
         """bool 属性经 encode->decode 往返保持布尔语义."""
@@ -785,3 +990,147 @@ class TestClientUA:
         assert h1["x-pcs-client-ua"] == "FIXED_UA"
         assert h2["x-pcs-client-ua"] == "OTHER_UA"
         assert h1["x-pcs-signature"] != h2["x-pcs-signature"]
+
+
+class TestModelDualEndpoint:
+    """模型双端点兼容(新设备 GetModelAndPlatFormJsonByProduct / 老设备 QueryModelInfo)."""
+
+    def _client(self, session):
+        return ImouClient(
+            session, session_id="s", token="t", internal_username="u",
+            api_host="https://gw.example.com",
+        )
+
+    async def test_new_endpoint_preferred_and_md5_stored(self):
+        """新设备: 新端点成功(modelPlatFormJson) → 用新模型并缓存 md5."""
+        model = {
+            "properties": [
+                {"identifier": "doorLockState", "ref": "108000",
+                 "dataType": {"specs": {}, "type": "enum"}, "accessMode": "r"},
+            ],
+            "services": [],
+        }
+        session = FakeSession({
+            "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({
+                "code": 10000,
+                "data": {"modelPlatFormJson": model, "md5": "ABC=="},
+            }),
+        })
+        client = self._client(session)
+        info = await client.async_get_model("SN1", "SKG8J5RP")
+        apis = [a for a, _ in session.calls_full]
+        assert apis == ["iot.manager.GetModelAndPlatFormJsonByProduct"]
+        assert info.has_property("doorLockState")
+        assert client._model_md5["SKG8J5RP"] == "ABC=="
+
+    async def test_new_endpoint_modeljson_field_also_accepted(self):
+        """响应字段 modelJson(我们落盘样例形状)同样被解析."""
+        model = {"properties": [
+            {"identifier": "child_lock", "ref": "120000",
+             "dataType": {"specs": {}, "type": "bool"}, "accessMode": "rw"},
+        ]}
+        session = FakeSession({
+            "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({
+                "code": 10000,
+                "data": {"modelJson": model, "md5": "X="},
+            }),
+        })
+        info = await self._client(session).async_get_model("SN1", "SKG8J5RP")
+        assert info.has_property("child_lock")
+
+    async def test_model_as_json_string_parsed(self):
+        """模型体为 JSON 字符串形态 → 解析后使用."""
+        model = json.dumps({"properties": [
+            {"identifier": "tamper", "ref": "105400",
+             "dataType": {"specs": {}, "type": "bool"}, "accessMode": "rw"},
+        ]})
+        session = FakeSession({
+            "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({
+                "code": 10000,
+                "data": {"modelPlatFormJson": model, "md5": "Y="},
+            }),
+        })
+        info = await self._client(session).async_get_model("SN1", "SKG8J5RP")
+        assert info.has_property("tamper")
+
+    async def test_md5_hit_empty_body_reuses_cached_model(self):
+        """md5 命中(空体) → 复用同 product 缓存模型, 不回落旧端点."""
+        model = {"properties": [
+            {"identifier": "doorLockState", "ref": "108000",
+             "dataType": {"specs": {}, "type": "enum"}, "accessMode": "r"},
+        ], "services": []}
+        session = FakeSession({
+            "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({
+                "code": 10000,
+                "data": {"modelPlatFormJson": {}, "md5": ""},
+            }),
+        })
+        client = self._client(session)
+        # 预置同 product 另一设备的缓存(模拟会话内已拉过)
+        client._model_cache["SN0:SKG8J5RP"] = ModelInfo(model)
+        client._model_md5["SKG8J5RP"] = "ABC=="
+        info = await client.async_get_model("SN1", "SKG8J5RP")
+        apis = [a for a, _ in session.calls_full]
+        assert apis == ["iot.manager.GetModelAndPlatFormJsonByProduct"]
+        assert info.has_property("doorLockState")
+        # 请求携带缓存 md5(App 同款缓存链)
+        body = json.loads(session.calls_full[0][1]["data"])
+        assert body["data"]["md5"] == "ABC=="
+
+    async def test_first_request_sends_admin_sentinel(self):
+        """无缓存首次请求 md5 发 App 哨兵值 'admin'."""
+        session = FakeSession({
+            "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({
+                "code": 10000,
+                "data": {"modelPlatFormJson": {}, "md5": ""},
+            }),
+            "iot.manager.QueryModelInfo": lambda: _resp(
+                {"code": 10000, "data": {"modelJson": _model_raw()}}
+            ),
+        })
+        await self._client(session).async_get_model("SN1", "SKG8J5RP")
+        body = json.loads(session.calls_full[0][1]["data"])
+        assert body["data"]["md5"] == "admin"
+        assert body["data"]["productId"] == "SKG8J5RP"
+        assert body["data"]["deviceId"] == "SN1"
+
+    async def test_old_device_falls_back_and_remembers(self):
+        """老设备: 新端点失败(11001) → 回落 QueryModelInfo, 此后不再试新."""
+        session = FakeSession({
+            "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp(
+                {"code": 11001, "desc": "unknown api"}
+            ),
+            "iot.manager.QueryModelInfo": lambda: _resp(
+                {"code": 10000, "data": {"modelJson": _model_raw()}}
+            ),
+        })
+        client = self._client(session)
+        info = await client.async_get_model("SN1", "SKG8J5RP")
+        assert "iot.manager.QueryModelInfo" in [a for a, _ in session.calls_full]
+        assert info.has_property("openDoorCombined")
+        # 第二次(缓存未命中键) → 直接走旧端点, 不再请求新端点
+        await client.async_get_model("SN2", "SKG8J5RP")
+        new_api_calls = [
+            a for a, _ in session.calls_full
+            if a == "iot.manager.GetModelAndPlatFormJsonByProduct"
+        ]
+        assert len(new_api_calls) == 1  # 仅首次尝试
+        assert info is client._model_cache["SN1:SKG8J5RP"]
+
+    async def test_empty_body_without_cache_falls_back(self):
+        """新端点空体且无可复用缓存(不支持该 product) → 回落旧端点."""
+        session = FakeSession({
+            "iot.manager.GetModelAndPlatFormJsonByProduct": lambda: _resp({
+                "code": 10000, "data": {"modelPlatFormJson": {}, "md5": ""},
+            }),
+            "iot.manager.QueryModelInfo": lambda: _resp(
+                {"code": 10000, "data": {"modelJson": _model_raw()}}
+            ),
+        })
+        info = await self._client(session).async_get_model("SN1", "OLDPRD")
+        apis = [a for a, _ in session.calls_full]
+        assert apis == [
+            "iot.manager.GetModelAndPlatFormJsonByProduct",
+            "iot.manager.QueryModelInfo",
+        ]
+        assert info.has_property("openDoorCombined")

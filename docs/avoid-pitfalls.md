@@ -31,6 +31,26 @@ HA 若用一步式（客户端自产 keyId 直接 Add）→ **设备不知晓 �
 
 ---
 
+### 坑 1b：两步式 SetService 入参畸形 → 签发了也不被设备认可 ★★★（v1.6.6 补）
+
+即便走了两步式，**step① 的 effectPeriod 畸形同样导致 state 恒 0**（设备无法
+落日程 → 认可不了）。v1.6.5 首版两步式踩了三个（已全部修复）：
+
+| 畸形 | 真相（bundle ue()/A(e) 逆向） |
+|---|---|
+| `26341: 127` 单条 | **26341 是枚举 0..6（周日..周六）**；127 是 App 本地算 usagePeriod 位图用的（`S[P[26341]]=1` → `parseInt('1111111',2)=127`），**从不发给设备**。"每天" = **7 条逐日条目** `{26341:0..6}` |
+| 时间 `000:00:00`/`023:59:59` | 格式是 **`'T'+HHMMSS` 无冒号**（App 兜底 `'T000000'/'T235959'`）；抓包 App Add 的 usagePeriod `'T0000Z'` 段 = `substring(0,5)`，只有 `'T000000'` 截得出，冒号格式已被证伪 |
+| Add 的 createTime/expiredTime 本地 now 重算 | App **直取出参 26326/26327 原值回传**（A(e) 的 v/h）；本地时钟与设备不一致 → 服务端对账失败 |
+
+另两处连带：**tempKey 不 zfill**（App 原样回传出参 key，补零会改密码）；
+usagePeriod 起止日期按**设备时区 UTC+8** 取"今天"（UTC 主机 16:00+ 会错位一天）。
+
+**避雷**：两步式的 step① 必须发 App 同款逐日 7 条 + `'T'+HHMMSS`；step②
+Add 用签发的 keyId/tempKey/时间原值。集成 `async_smart_lock_create_snapkey`
+已对齐（回归测试 `test_create_snapkey_two_step_server_issued`）。
+
+---
+
 ### 坑 2：删除走消息域 → 12100 / 500 ★★★
 
 | 现象 | 原因 |

@@ -124,6 +124,49 @@ async def test_manager_cloud_fallback_when_disconnected():
 
 
 @pytest.mark.asyncio
+async def test_manager_refuses_write_apis_readonly_policy():
+    """MQTT 只读铁律: 写/服务类 API 在 async_request 入口直接拒绝."""
+    api = _FakeApi()
+
+    async def cloud_ctrl(api_name, params):
+        raise AssertionError("write API must not reach cloud via mqtt layer")
+
+    mgr = mqtt.MqttManager(
+        api, "DEV", "PROD", cloud_ctrl,
+        on_event=_noop_event, certs_dir="",
+    )
+    for banned in (
+        "iot.control.SetProperties",
+        "iot.control.SetIotProperties",
+        "iot.control.SetService",
+        "iot.control.SetIotService",
+        "iot.control.SendToRemoter",
+        "transfer.device.Wakeup",
+    ):
+        with pytest.raises(ValueError, match="read-only"):
+            await mgr.async_request(banned, {"x": 1})
+    # 查询类照常(走 cloud_ctrl)
+    calls = []
+
+    async def read_ctrl(api_name, params):
+        calls.append(api_name)
+        return {"code": 10000}
+
+    mgr.cloud_ctrl = read_ctrl
+    resp = await mgr.async_request("iot.control.GetIotProperties", {"x": 1})
+    assert resp.get("via") == "cloud"
+    assert calls == ["iot.control.GetIotProperties"]
+
+
+@pytest.mark.asyncio
+async def test_mqtt_client_request_path_removed():
+    """MqttClient.async_request 已按只读策略移除 → 调用即 NotImplementedError."""
+    client = mc.MqttClient("cid", "u", "p", "host", 8883)
+    with pytest.raises(NotImplementedError):
+        await client.async_request("iot.control.GetProperties", {})
+
+
+@pytest.mark.asyncio
 async def test_manager_connected_property_true():
     """connected 属性: 未连接时 False; 不应抛异常(惰性)."""
     api = _FakeApi()

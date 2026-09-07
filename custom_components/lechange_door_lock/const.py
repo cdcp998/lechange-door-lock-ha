@@ -98,6 +98,10 @@ CA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs", "dah
 
 DEFAULT_SCAN_INTERVAL = 30  # seconds
 
+# 乐观写入竞态抑制窗口(秒): 写入成功后登记 pending, 设备确认(轮询/MQTT
+# 读回同值)或窗口过期前, 迟到的旧值不覆盖 props —— 防童锁/开关状态跳动
+PENDING_WRITE_WINDOW = 90
+
 # Platforms
 PLATFORMS = ["sensor", "binary_sensor", "button", "switch", "camera",
              "number", "select", "text", "time"]
@@ -220,3 +224,54 @@ DEFAULT_SNAPKEY_CONFIG = {
     "end_time": "23:59:59",
     # weekday_mode 已移除: 系统自动按每天(掩码 127)分配, 不再提供配置项
 }
+
+# --- 开门设置属性面(App「开门设置」页, iot.control Get/SetProperties) --------
+# 来源: API/report/开门设置API提取与测试.md(热更包逆向 + SKG8J5RP 实测)
+#       + API/report/lock_model_SKG8J5RP.json(物模型, ref/accessMode/枚举)。
+# ★ 写值铁律: SetProperties 值必须是 **int**(字符串被设备拒 19999)。
+# ★ 能力门控: 实体仅在「型号声明 ∩ 实测返回」时创建(见 door_settings.py),
+#   本机(SKG8J5RP)实测未返回的属性(openDoorByTouch/openDoorMsg 等)不会建实体。
+# ★ 高危约束(与 WI-004 一致): sdl_forceLock(强制锁定)/electroniclock(电子
+#   反锁)/openDoorCombined(组合开门) **只读展示, 不提供写控制**。
+
+CONF_DOOR_SETTINGS_SUPPORTED = "door_settings_supported"  # entry.options: 已确认清单
+
+# 可写开关(enum/bool 0|1): identifier → translation_key
+DOOR_SETTING_SWITCHES = {
+    "sdl_autoLock": "auto_lock",                    # 145100 门锁自动上锁
+    "sdl_doorOpenReSwitch": "door_open_reminder",   # 162700 门未关提醒(写实测 PASS)
+    "sdl_faceAutoOpenDoor": "face_auto_open",       # 133100 人脸自动感应开门
+    "sdl_welcomeHomeLightSwitch": "welcome_light",  # 163300 回家欢迎灯
+    "sdl_hJReOpDoorSwitch": "hj_remote_open",       # 163200 和家智话远程开门
+    "openDoorByTouch": "open_door_by_touch",        # 102600 触摸开门(本机未返回→门控排除)
+    "openDoorMsg": "open_door_msg",                 # 107100 开门消息推送(同上)
+}
+
+# 多值选择(enum): identifier → (translation_key, {枚举值: 选项键})
+# 枚举表与 lock_model_SKG8J5RP.json specs.list 一致
+DOOR_SETTING_SELECTS = {
+    "sdl_autoLockTime": ("auto_lock_time", {           # 145200 自动上锁时间(秒)
+        15: "15s", 30: "30s", 45: "45s", 60: "60s", 180: "180s"}),
+    "sdl_doorOpenReTime": ("door_open_reminder_time", {  # 162800 门未关提醒时间(秒)
+        30: "30s", 60: "60s", 180: "180s"}),
+    "sdl_antiMmaloperationTime": ("anti_misoperation_time", {  # 133200 防误开时间
+        0: "0s", 1: "15s", 2: "30s", 3: "45s", 4: "60s", 5: "180s"}),
+    "deviceLockVol": ("lock_volume", {                 # 106900 提示音音量
+        0: "mute", 1: "low", 2: "lower", 3: "normal", 4: "higher", 5: "high"}),
+    "sdl_indoorOpenMode": ("indoor_open_mode", {       # 173600 室内开门模式
+        0: "physical_button", 1: "touch"}),
+}
+
+# 只读状态(高危/设备侧写入, 仅可见性): identifier → translation_key
+DOOR_SETTING_SENSORS = {
+    "sdl_forceLock": "force_lock_state",        # 146300 强制锁定(高危勿写)
+    "electroniclock": "electronic_lock_state",  # 115200 电子反锁(高危勿写)
+    "openDoorCombined": "open_door_combined_state",  # 106400 组合开门(高危勿写)
+}
+
+# 轮询/探测清单(独立 GetProperties 批次, 与核心属性分批防挤占)
+DOOR_SETTING_IDENTIFIERS = (
+    *DOOR_SETTING_SWITCHES,
+    *DOOR_SETTING_SELECTS,
+    *DOOR_SETTING_SENSORS,
+)

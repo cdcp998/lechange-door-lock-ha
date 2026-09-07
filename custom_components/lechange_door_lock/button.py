@@ -30,6 +30,7 @@ async def async_setup_entry(
         LeChangeSnapshotDoorButton(coordinator, device_id),
         LeChangeGenerateSnapkeyButton(coordinator, device_id),
         LeChangeRefreshSnapkeyListButton(coordinator, device_id),
+        LeChangeWakeUpButton(coordinator, device_id),
     ]
     async_add_entities(entities)
 
@@ -116,10 +117,12 @@ class LeChangeSnapshotDoorButton(_BaseLeChangeButton):
 
 
 class LeChangeGenerateSnapkeyButton(_BaseLeChangeButton):
-    """按实体化配置(名称/次数/天数/星期/时间段)生成临时密码.
+    """按实体化配置(名称/次数/天数)生成临时密码.
 
-    纯消息域云 API(iot.message.SmartLockSecretAdd):客户端自产 keyId/tempKey,
-    不使用 iot.control.SetService(避免触发身份验证码),设备休眠也可用。
+    两步式优先(App 同链路): SetService CreateDeviceSnapkey 服务端签发
+    key/keyID(设备知晓 → state 0→1 认可, 激活时不再被清理) → 消息域
+    SmartLockSecretAdd 固化登记; 设备离线回落客户端自产(state=0 草稿,
+    mode 字段区分)。
     """
 
     def __init__(self, coordinator, device_id: str) -> None:
@@ -137,7 +140,7 @@ class LeChangeGenerateSnapkeyButton(_BaseLeChangeButton):
 
     async def async_press(self) -> None:
         coordinator = self.coordinator
-        # 客户端生成 tempKey,经消息域 Add 直接登记(实测)
+        # 两步式优先(服务端签发), 离线回落客户端自产 — coordinator 内分流
         result = await coordinator.async_create_snapkey_cloud()
         coordinator.set_snapkey_result(result)
         coordinator.hass.bus.async_fire(
@@ -171,3 +174,30 @@ class LeChangeRefreshSnapkeyListButton(_BaseLeChangeButton):
         )
         await coordinator.async_request_refresh()
         _LOGGER.info("Temporary password list refreshed for %s", self._device_id)
+
+
+class LeChangeWakeUpButton(_BaseLeChangeButton):
+    """唤醒设备(电池锁休眠后手动唤醒).
+
+    用途: 开门设置等改值写在设备休眠时会被拒(19999, 见
+    开门设置API提取与测试.md §3.3)—— 先点此按钮唤醒(~5s 上线,
+    GetRealTransferStreamUrl 请求自带唤醒语义), 再操作开关/选择。
+    属性写入路径也内置了"失败→唤醒→重试一次", 此按钮是手动兜底。
+    """
+
+    _attr_icon = "mdi:power-sleep"
+
+    def __init__(self, coordinator, device_id: str) -> None:
+        super().__init__(coordinator, device_id, "wake_up")
+
+    async def async_press(self) -> None:
+        coordinator = self.coordinator
+        awake = await coordinator.ensure_awake(max_wait=15.0)
+        coordinator.hass.bus.async_fire(
+            EVENT_PREFIX,
+            {"type": "wake_up", "device_id": self._device_id, "awake": awake},
+        )
+        _LOGGER.info(
+            "Wake-up button pressed for %s: device %s",
+            self._device_id, "online" if awake else "still sleeping",
+        )

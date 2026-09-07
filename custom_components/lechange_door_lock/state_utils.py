@@ -178,9 +178,15 @@ def build_usage_period(effect_days: int, now: Optional[datetime] = None) -> str:
       (创建日 + effective_day)约束, 日期区间本身就是生效范围, 星期维度
       不再需要用户配置(原 snapkey_weekdays 选择项已移除)。
     结束日期 = 开始日期 + 有效天数(effectTimes=1 → 当日00:00 至次日23:59)。
+    ★ 起止日期按**设备时区(UTC+8, 全库约定)**取"今天" —— App 用手机本地
+      时区(中国市场即 UTC+8)计算; HA 主机若为 UTC, 16:00-24:00 UTC 恰是
+      次日, 用主机本地日期会与 App 产出的窗口错位一天。
     """
     if now is None:
-        now = datetime.now()
+        now = datetime.now(_local_tz())
+    elif now.tzinfo is not None:
+        # aware 传入 → 先折算到设备时区再取"今天"(UTC 主机不错位一天)
+        now = now.astimezone(_local_tz())
     begin = now.date()
     end = begin + timedelta(days=max(int(effect_days), 1))
     return (

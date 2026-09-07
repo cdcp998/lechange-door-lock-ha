@@ -7,19 +7,25 @@ from homeassistant.components.sensor import (
     SensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import (
+    PERCENTAGE,
+    EntityCategory,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     CONF_DEVICE_ID,
+    DOOR_SETTING_SENSORS,
     DOMAIN,
     PROP_LOCK_STATE,
     PROP_POWER_MODE,
     WORK_MODE_OPTIONS,
 )
+from .door_settings import resolve_door_setting_capabilities
 from .entity import LeChangeEntity
 from .state_utils import (
+    _int_or_none,
     derive_door_state,
     derive_lock_state,
     format_alarm_entries,
@@ -54,6 +60,14 @@ async def async_setup_entry(
         LeChangeSnapkeyCountSensor(coordinator, device_id),
         LeChangeLatestAlarmSensor(coordinator, device_id),
     ]
+    # ★ 开门设置高危属性只读传感器: 能力门控创建(型号声明 ∩ 实测返回);
+    #   ⚠️ 强制锁定/电子反锁/组合开门 只读展示, 不提供任何写控制(WI-004)。
+    caps = await resolve_door_setting_capabilities(coordinator)
+    for prop, key in DOOR_SETTING_SENSORS.items():
+        if prop in caps:
+            entities.append(
+                LeChangeDoorSettingStateSensor(coordinator, device_id, prop, key)
+            )
     async_add_entities(entities)
 
 
@@ -331,3 +345,34 @@ class LeChangeLatestAlarmSensor(_BaseLeChangeSensor):
                 alarms, lang=self.coordinator.language
             ) or None,
         }
+
+
+DOOR_SETTING_STATE_OPTIONS = ["off", "on"]
+
+
+class LeChangeDoorSettingStateSensor(_BaseLeChangeSensor):
+    """开门设置高危属性只读状态(强制锁定/电子反锁/组合开门).
+
+    ⚠️ 只读展示, 刻意不提供 HA 写控制 —— 开启后仅管理员可开/普通密钥
+    失效/改动开锁方式(开门设置API提取与测试.md 高危约束, 与 WI-004
+    一致); 状态变化(用户在 App 操作)经轮询/MQTT 推送反映。
+    能力门控: 型号声明 ∩ 实测返回才创建。
+    """
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_options = DOOR_SETTING_STATE_OPTIONS
+
+    def __init__(self, coordinator, device_id: str, prop: str, translation_key: str) -> None:
+        super().__init__(coordinator, device_id, translation_key)
+        self._prop = prop
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data
+        if not data:
+            return None
+        v = _int_or_none((data.get("props") or {}).get(self._prop))
+        if v is None:
+            return None
+        return "on" if v == 1 else "off"

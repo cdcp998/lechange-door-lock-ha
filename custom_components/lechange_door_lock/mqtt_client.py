@@ -205,7 +205,6 @@ class MqttClient:
         # "0 bytes read on a total of 1 expected bytes" 退避刷屏数分钟)
         self._session_up = False
         self._seq = random.randint(1000, 9999)
-        self._pending: dict[int, asyncio.Future] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._read_task: Optional[asyncio.Task] = None
         self._ping_task: Optional[asyncio.Task] = None
@@ -281,7 +280,12 @@ class MqttClient:
         self._reader = self._writer = None
 
     async def async_publish(self, topic: str, payload: bytes, pid: int) -> None:
-        """QoS1 publish(等服务端 PUBACK)."""
+        """QoS1 publish(等服务端 PUBACK).
+
+        ★ 仅保留给 DISCONNECT/PING 语义与未来只读扩展; iot_request 请求
+          发布路径已按"MQTT 只读铁律"移除(async_request)—— 写/服务一律
+          HTTP 云 API(imou_client.async_post), 读取靠订阅推送 + 轮询。
+        """
         if not self._connected or not self._writer:
             raise ConnectionError("MQTT not connected")
         self._writer.write(_pkt_publish(topic, payload, pid))
@@ -289,23 +293,17 @@ class MqttClient:
         # 读 PUBACK(可容忍若干读取在 read_loop 中)
         # read_loop 会把 PUBACK 丢弃; 这里不等 PUBACK(保持简单)
 
-    async def async_request(self, api: str, params: dict, timeout: float = 12.0) -> dict:
-        """publish iot_request 并等 iot_response(seq 匹配). 云 API 兜底由调用方。"""
-        if not self._connected:
-            raise ConnectionError("MQTT not connected")
-        self._seq += 1
-        seq = self._seq
-        fut: asyncio.Future = self._loop.create_future()
-        # 先注册再发布: 防止响应在注册前到达被 _read_loop 丢弃(竞态)
-        self._pending[seq] = fut
-        req = {"api": api, "params": params, "seq": seq}
-        try:
-            await self.async_publish(TOPIC_REQUEST, json.dumps(
-                req, separators=(",", ":")
-            ).encode(), pid=seq % 65535)
-            return await asyncio.wait_for(fut, timeout=timeout)
-        finally:
-            self._pending.pop(seq, None)
+    async def async_request(self, api: str, params: dict, timeout: float = 12.0) -> None:
+        """★ 已按 MQTT 只读铁律停用: 不再向 iot_request 发布任何请求.
+
+        MQTT 通道仅订阅推送(读); 属性读取走 HTTP 云 API
+        (imou_client.async_get_properties) + 推送订阅, 写/服务一律 HTTP。
+        保留方法签名(历史调用/facade 兼容), 调用即抛错并指向正确入口。
+        """
+        raise NotImplementedError(
+            "MQTT request channel removed (read-only policy) — "
+            f"use ImouClient.async_post / async_get_properties for {api!r}"
+        )
 
     async def _read_loop(self) -> None:
         try:
@@ -327,10 +325,6 @@ class MqttClient:
                 _LOGGER.warning("MQTT read loop ended: %s", err)
             self._connected = False
             self._session_up = False  # 异常掉线: 会话状态不明, 不发 DISCONNECT
-        finally:
-            for fut in self._pending.values():
-                if not fut.done():
-                    fut.set_exception(ConnectionError("MQTT connection lost"))
 
     async def _on_publish(self, payload: bytes) -> None:
         topic_len = struct.unpack(">H", payload[:2])[0]
@@ -341,14 +335,8 @@ class MqttClient:
             msg = json.loads(body.decode(errors="replace"))
         except (json.JSONDecodeError, UnicodeDecodeError):
             return
-        # seq 匹配请求响应
-        seq = msg.get("seq") or msg.get("id")
-        if isinstance(seq, int) and seq in self._pending:
-            fut = self._pending.get(seq)
-            if fut and not fut.done():
-                fut.set_result(msg)
-            return
-        # 推送(事件/属性更新)
+        # ★ 只读铁律: 推送(事件/属性更新)直接转回调 —— iot_response 的
+        #   seq 请求匹配已随 iot_request 发布路径移除(无请求即无响应)。
         if self.on_message:
             try:
                 await self.on_message(topic, msg)

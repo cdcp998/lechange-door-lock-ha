@@ -181,6 +181,27 @@
       },
       "latest_alarm": {
         "name": "Alarm info"
+      },
+      "force_lock_state": {
+        "name": "Force lock state",
+        "state": {
+          "off": "Off",
+          "on": "On"
+        }
+      },
+      "electronic_lock_state": {
+        "name": "Electronic lock state",
+        "state": {
+          "off": "Off",
+          "on": "On"
+        }
+      },
+      "open_door_combined_state": {
+        "name": "Combined unlock state",
+        "state": {
+          "off": "Off",
+          "on": "On"
+        }
       }
     },
     "binary_sensor": {
@@ -250,6 +271,53 @@
           "vstack": "Stacked",
           "single": "Single camera"
         }
+      },
+      "auto_lock_time": {
+        "name": "Auto lock delay",
+        "state": {
+          "15s": "15 s",
+          "30s": "30 s",
+          "45s": "45 s",
+          "60s": "60 s",
+          "180s": "180 s"
+        }
+      },
+      "door_open_reminder_time": {
+        "name": "Door-open reminder delay",
+        "state": {
+          "30s": "30 s",
+          "60s": "60 s",
+          "180s": "180 s"
+        }
+      },
+      "anti_misoperation_time": {
+        "name": "Face anti-misoperation delay",
+        "state": {
+          "0s": "0 s (off)",
+          "15s": "15 s",
+          "30s": "30 s",
+          "45s": "45 s",
+          "60s": "60 s",
+          "180s": "180 s"
+        }
+      },
+      "lock_volume": {
+        "name": "Lock volume",
+        "state": {
+          "mute": "Mute",
+          "low": "Low",
+          "lower": "Lower",
+          "normal": "Normal",
+          "higher": "Higher",
+          "high": "High"
+        }
+      },
+      "indoor_open_mode": {
+        "name": "Indoor open mode",
+        "state": {
+          "physical_button": "Physical button",
+          "touch": "Touch"
+        }
       }
     },
     "text": {
@@ -271,6 +339,27 @@
       },
       "call_transfer": {
         "name": "Call transfer"
+      },
+      "auto_lock": {
+        "name": "Auto lock"
+      },
+      "door_open_reminder": {
+        "name": "Door-open reminder"
+      },
+      "face_auto_open": {
+        "name": "Face auto unlock"
+      },
+      "welcome_light": {
+        "name": "Welcome home light"
+      },
+      "hj_remote_open": {
+        "name": "HeJia remote unlock"
+      },
+      "open_door_by_touch": {
+        "name": "Unlock by touch"
+      },
+      "open_door_msg": {
+        "name": "Open-door push message"
       }
     },
     "camera": {

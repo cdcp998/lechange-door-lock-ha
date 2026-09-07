@@ -123,6 +123,15 @@ class TestSnapkeyWeekdays:
         now = datetime(2026, 9, 3, 12, 0, 0)
         assert build_usage_period(0, now) == "127-20260903T0000Z-20260904T2359Z"
 
+    def test_build_usage_period_device_tz_default(self):
+        """缺省 now 按设备时区(UTC+8)取"今天" — UTC 主机 16:00+ 不错位一天."""
+        # UTC 2026-09-03 20:00 = UTC+8 的 2026-09-04 04:00 → begin=0904
+        utc_now = datetime(2026, 9, 3, 20, 0, 0, tzinfo=timezone.utc)
+        assert build_usage_period(1, utc_now) == "127-20260904T0000Z-20260905T2359Z"
+        # naive 传入仍按本地挂钟语义(显式 now 不做时区重解释)
+        naive_now = datetime(2026, 9, 3, 12, 0, 0)
+        assert build_usage_period(1, naive_now) == "127-20260903T0000Z-20260904T2359Z"
+
 
 class TestOpenRecordDisplay:
     def test_format_time_local_format(self):

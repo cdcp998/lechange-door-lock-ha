@@ -242,6 +242,7 @@ def test_other_platform_entities_constructible():
         button.LeChangeSnapshotDoorButton(coord, "DEV1"),
         button.LeChangeGenerateSnapkeyButton(coord, "DEV1"),
         button.LeChangeRefreshSnapkeyListButton(coord, "DEV1"),
+        button.LeChangeWakeUpButton(coord, "DEV1"),
     ]
     # select(工作模式 + 截图通道/布局)
     sel = [
@@ -424,3 +425,32 @@ def test_snapkey_sensor_last_generated_only_when_present():
     entity = sensor.LeChangeSnapkeyCountSensor(coord, "DEV1")
     attrs = entity.extra_state_attributes
     assert attrs == {"last_generated": {"name": "P", "tempKey": "12345678"}}
+
+
+def test_door_setting_entities_constructible():
+    """开门设置实体(开关/选择/只读状态)构造冒烟(能力门控前的可构造性)."""
+    coord = _fake_coordinator()
+    switches = [
+        switch.LeChangeDoorSettingSwitch(coord, "DEV1", "sdl_autoLock", "auto_lock"),
+        switch.LeChangeDoorSettingSwitch(
+            coord, "DEV1", "sdl_doorOpenReSwitch", "door_open_reminder"
+        ),
+    ]
+    selects = [
+        select_mod.LeChangeDoorSettingSelect(
+            coord, "DEV1", "sdl_autoLockTime", "auto_lock_time",
+            {15: "15s", 30: "30s", 45: "45s", 60: "60s", 180: "180s"},
+        ),
+        select_mod.LeChangeDoorSettingSelect(
+            coord, "DEV1", "deviceLockVol", "lock_volume",
+            {0: "mute", 1: "low", 2: "lower", 3: "normal", 4: "higher", 5: "high"},
+        ),
+    ]
+    state_sensors = [
+        sensor.LeChangeDoorSettingStateSensor(
+            coord, "DEV1", "sdl_forceLock", "force_lock_state"
+        ),
+    ]
+    for e in [*switches, *selects, *state_sensors]:
+        assert e._attr_unique_id and e._attr_translation_key, type(e).__name__
+        assert e._attr_unique_id == f"DEV1_{e._attr_translation_key}"

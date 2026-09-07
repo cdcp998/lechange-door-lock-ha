@@ -23,6 +23,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_DEVICE_NAME,
     CONF_API_HOST,
+    CONF_DOOR_SETTINGS_SUPPORTED,
     CONF_INTERNAL_USERNAME,
     CONF_LAST_SNAPKEY_RESULT,
     CONF_PASSWORD,
@@ -32,9 +33,11 @@ from .const import (
     CONF_TOKEN,
     CONF_USERNAME,
     DEFAULT_SNAPKEY_CONFIG,
+    DOOR_SETTING_IDENTIFIERS,
     DOMAIN,
     DEFAULT_SCAN_INTERVAL,
     EVENT_PREFIX,
+    PENDING_WRITE_WINDOW,
     STATUS_ONLINE,
     STATUS_SLEEP,
     PROP_LOCK_NOTE_REPORT,
@@ -378,15 +381,46 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
                     [k for k in missing if k not in props] or "none",
                 )
 
+        # ---- 开门设置属性批(独立 GetProperties 请求) -----------------------
+        # ★ 与核心属性分批: 报告实测(开门设置API提取与测试.md §3.1)单请求
+        #   20 属性仅有效返回 15 个 —— 分批避免核心属性(电量/WiFi/童锁)
+        #   被挤丢。云端按设备能力过滤, 型号声明但本机不支持的属性被静默
+        #   丢弃 → 返回键集即"实测支持"能力证据(door_settings.py 门控用)。
+        #   失败静默: 从上次 props 继承开门设置键(设备休眠韧性)。
+        door_props = {}
+        try:
+            door_props = await self.api.async_get_properties(
+                self.device_id, self.product_id, self.channel_id,
+                properties=list(DOOR_SETTING_IDENTIFIERS),
+            )
+            if isinstance(door_props, dict):
+                props.update(door_props)
+            else:
+                door_props = {}
+        except ImouAPIError as err:
+            _LOGGER.debug("Door-settings GetProperties failed: %s", err)
+            prev_props = (prev or {}).get("props") or {}
+            for ident in DOOR_SETTING_IDENTIFIERS:
+                if ident in prev_props:
+                    props.setdefault(ident, prev_props[ident])
+
         # 本次拿到属性才覆盖;空 props(休眠且快照缺)时保留上次值,
         # 避免 MQTT 刚推的实时状态/电量/记录被轮询清零。
-        # ★ 合并而非整体替换: 某次轮询缺 sdl_inOpenDoorModel 等键(休眠/
-        #   设备应答快)时覆盖会丢真值 → 状态闪跳(开关/传感器短暂变 None)。
-        if props:
-            current = data.get("props") or {}
-            merged = dict(current)
-            merged.update(props)
-            data["props"] = merged
+        # ★ 跨轮合并而非整体替换: data 是本轮新建字典, data["props"] 若有值
+        #   也只来自本轮(继承仅到展示字段);真值基线必须取 self.data(上轮
+        #   已提交数据)。否则"合并"名存实亡 —— 每轮被本轮响应整体覆盖,
+        #   响应缺 sdl_inOpenDoorModel 等键时真值丢失 → 开关/传感器闪跳。
+        #   (童锁状态"关↔开"跳动的根因之一, 与 inherit_previous 互补)
+        baseline = (self.data or {}).get("props") if isinstance(self.data, dict) else None
+        current = dict(baseline) if isinstance(baseline, dict) else {}
+        current.update(data.get("props") or {})  # 本轮已产出的(如 MQTT 早期合并)优先
+        # ★ 乐观写入竞态抑制: pending 窗口内迟到的旧值不覆盖(设备确认值
+        #   或窗口过期才接受) —— 写入后刚发出的轮询带着写入前旧值返回,
+        #   曾把乐观值打回造成"开关自己弹回去"的回弹跳动。
+        props = self._filter_pending_overrides(props, current)
+        current.update(props)
+        if current:
+            data["props"] = current
 
         # ---- derived fields(仅本次有对应原始字段时覆盖) --------------------
         if "doorLockStatus" in props:
@@ -469,6 +503,57 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
         except (ImouAPIError, TypeError, ValueError, json.JSONDecodeError) as err:
             _LOGGER.debug("propertiesMap decode failed: %s", err)
             return {}
+
+    # ------------------------------------------------- 乐观写入竞态抑制
+    @staticmethod
+    def _is_confirmed(value, pending) -> bool:
+        """设备侧值与 pending 目标一致(含 "1"/1/True 同义)即视为已确认."""
+        return value == pending or (
+            isinstance(pending, int) and str(value) == str(pending)
+        )
+
+    def _filter_pending_overrides(self, props: dict, baseline: dict) -> dict:
+        """乐观写入窗口内的迟到旧值过滤(返回可直接合并进 baseline 的 props).
+
+        写入成功时 register_pending_write(prop, value) 登记; 此后
+        PENDING_WRITE_WINDOW 秒内, 对该键与目标不同的读回值一律丢弃:
+        - 设备确认(读回 == 目标) → 消费掉 pending, 新值放行;
+        - 窗口过期 → pending 作废, 之后任何值放行(以设备真值为准)。
+        baseline 中该键缺失时不过滤(绝不用 pending 凭空造值)。
+        """
+        if not props:
+            return props
+        now = time.monotonic()
+        pending_map = getattr(self, "_pending_writes", None)
+        if pending_map:
+            for key, (target, expire_at) in list(pending_map.items()):
+                if key not in props:
+                    if now >= expire_at:
+                        pending_map.pop(key, None)
+                    continue
+                incoming = props[key]
+                if self._is_confirmed(incoming, target):
+                    # 设备已确认目标值 → pending 完成, 放行
+                    pending_map.pop(key, None)
+                    continue
+                if now < expire_at and key in baseline:
+                    _LOGGER.debug(
+                        "Suppressed stale value for %s (%r != pending %r) "
+                        "within write window", key, incoming, target,
+                    )
+                    props = {k: v for k, v in props.items() if k != key}
+                else:
+                    # 窗口过期(或 baseline 无此键) → 作废并以设备值为准
+                    pending_map.pop(key, None)
+        return props
+
+    def register_pending_write(self, prop: str, value) -> None:
+        """登记乐观写入(写入成功后调用), 开启迟到旧值抑制窗口."""
+        if not hasattr(self, "_pending_writes"):
+            self._pending_writes: dict[str, tuple] = {}
+        self._pending_writes[prop] = (
+            value, time.monotonic() + PENDING_WRITE_WINDOW,
+        )
 
     def _fire_new_lock_notes(self, notes: list) -> None:
         """Fire an event for each newly seen door-open record."""
@@ -568,6 +653,20 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
             options={**self.entry.options, **updates},
         )
 
+    def persist_door_settings(self, identifiers: list) -> None:
+        """持久化已确认的开门设置能力清单(entry.options, 重启不丢).
+
+        确认证据 = GetProperties 实际返回过该属性(云端按设备能力过滤,
+        未返回 = 本机不支持);持久化避免休眠窗口错过实体创建。
+        """
+        self.hass.config_entries.async_update_entry(
+            self.entry,
+            options={
+                **self.entry.options,
+                CONF_DOOR_SETTINGS_SUPPORTED: list(identifiers),
+            },
+        )
+
     async def async_create_snapkey_cloud(self, config: Optional[dict] = None) -> dict:
         """生成临时密码(App 同链路两步式优先).
 
@@ -621,6 +720,9 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
                 "key_id": created["key_id"],
                 "mode": "server",
                 "usage_period": usage_period,
+                # 服务端签发时间(原样回传给展示/审计; Add 登记已用同值)
+                "create_time": created.get("create_time"),
+                "expires_time": created.get("expires_time"),
                 "raw": created["raw"],
             }
         except ImouAPIError as err:
@@ -760,16 +862,22 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
                     # 合并实时属性到 data(实体 is_on 直接读取)。
                     # 非变更合并: 传入的 new_data 直接写回时 triggers 轮询监
                     # 听器(CONST 警告刷屏); 仅在确有新值时提交。
+                    # ★ 迟到旧值过滤(iot_response 可能是写入前发出的请求的
+                    #   回显): 乐观写入窗口内与目标不符的值不合并。
                     current = dict(self.data or {})
-                    merged_props = dict(current.get("props") or {})
-                    merged_props.update(decoded)
-                    changed = merged_props != current.get("props")
-                    if changed:
-                        new_data = dict(current)
-                        new_data["_mqtt_props"] = decoded
-                        new_data["props"] = merged_props
-                        new_data["mqtt_online"] = True
-                        self.async_set_updated_data(new_data)
+                    filtered = self._filter_pending_overrides(
+                        dict(decoded), current.get("props") or {}
+                    )
+                    if filtered:
+                        merged_props = dict(current.get("props") or {})
+                        merged_props.update(filtered)
+                        changed = merged_props != current.get("props")
+                        if changed:
+                            new_data = dict(current)
+                            new_data["_mqtt_props"] = filtered
+                            new_data["props"] = merged_props
+                            new_data["mqtt_online"] = True
+                            self.async_set_updated_data(new_data)
                 except Exception:  # noqa: BLE001
                     _LOGGER.debug("MQTT props decode/update failed", exc_info=True)
             elif inner.get("code") == 10000:
@@ -785,12 +893,18 @@ class LeChangeDataUpdateCoordinator(DataUpdateCoordinator):
                     decoded = model.decode_properties(props) if isinstance(props, dict) else {}
                     if decoded:
                         current = dict(self.data or {})
-                        merged_props = dict(current.get("props") or {})
-                        merged_props.update(decoded)
-                        if merged_props != current.get("props"):
-                            new_data = dict(current)
-                            new_data["props"] = merged_props
-                            self.async_set_updated_data(new_data)
+                        # ★ 迟到旧值过滤: 设备休眠唤醒早期可能回推写入前的
+                        #   属性快照, 乐观写入窗口内不回打(防跳动)。
+                        filtered = self._filter_pending_overrides(
+                            dict(decoded), current.get("props") or {}
+                        )
+                        if filtered:
+                            merged_props = dict(current.get("props") or {})
+                            merged_props.update(filtered)
+                            if merged_props != current.get("props"):
+                                new_data = dict(current)
+                                new_data["props"] = merged_props
+                                self.async_set_updated_data(new_data)
                 except Exception:  # noqa: BLE001
                     _LOGGER.debug("MQTT property push decode failed", exc_info=True)
         _LOGGER.debug("MQTT event: topic=%s keys=%s", topic, list(msg.keys())[:5])

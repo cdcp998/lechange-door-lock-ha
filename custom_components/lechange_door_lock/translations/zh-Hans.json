@@ -180,6 +180,27 @@
       },
       "latest_alarm": {
         "name": "告警信息"
+      },
+      "force_lock_state": {
+        "name": "强制锁定状态",
+        "state": {
+          "off": "关闭",
+          "on": "开启"
+        }
+      },
+      "electronic_lock_state": {
+        "name": "电子反锁状态",
+        "state": {
+          "off": "关闭",
+          "on": "开启"
+        }
+      },
+      "open_door_combined_state": {
+        "name": "组合开门状态",
+        "state": {
+          "off": "关闭",
+          "on": "开启"
+        }
       }
     },
     "binary_sensor": {
@@ -249,6 +270,53 @@
           "vstack": "上下组合(双通道纵排)",
           "single": "单摄单图"
         }
+      },
+      "auto_lock_time": {
+        "name": "自动上锁时间",
+        "state": {
+          "15s": "15 秒",
+          "30s": "30 秒",
+          "45s": "45 秒",
+          "60s": "60 秒",
+          "180s": "180 秒"
+        }
+      },
+      "door_open_reminder_time": {
+        "name": "门未关提醒时间",
+        "state": {
+          "30s": "30 秒",
+          "60s": "60 秒",
+          "180s": "180 秒"
+        }
+      },
+      "anti_misoperation_time": {
+        "name": "防误开时间",
+        "state": {
+          "0s": "0 秒(关闭)",
+          "15s": "15 秒",
+          "30s": "30 秒",
+          "45s": "45 秒",
+          "60s": "60 秒",
+          "180s": "180 秒"
+        }
+      },
+      "lock_volume": {
+        "name": "提示音音量",
+        "state": {
+          "mute": "静音",
+          "low": "低",
+          "lower": "较低",
+          "normal": "一般",
+          "higher": "较高",
+          "high": "高"
+        }
+      },
+      "indoor_open_mode": {
+        "name": "室内开门模式",
+        "state": {
+          "physical_button": "实体按键",
+          "touch": "触摸"
+        }
       }
     },
     "text": {
@@ -270,6 +338,27 @@
       },
       "call_transfer": {
         "name": "呼叫转接"
+      },
+      "auto_lock": {
+        "name": "门锁自动上锁"
+      },
+      "door_open_reminder": {
+        "name": "门未关提醒"
+      },
+      "face_auto_open": {
+        "name": "人脸自动感应开门"
+      },
+      "welcome_light": {
+        "name": "回家欢迎灯"
+      },
+      "hj_remote_open": {
+        "name": "和家智话远程开门"
+      },
+      "open_door_by_touch": {
+        "name": "触摸开门"
+      },
+      "open_door_msg": {
+        "name": "开门消息推送"
       }
     },
     "camera": {
